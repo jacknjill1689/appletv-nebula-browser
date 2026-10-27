@@ -20,9 +20,10 @@ NS_ASSUME_NONNULL_BEGIN
                       title:(nullable NSString *)title
              requestHeaders:(nullable NSDictionary<NSString *, NSString *> *)requestHeaders
                     cookies:(nullable NSArray<NSHTTPCookie *> *)cookies NS_DESIGNATED_INITIALIZER;
-// Freshest master playlist URLs captured by the media probes (oldest-first);
-// handed to the asset loader so a 403/404 media playlist in the same stream
-// family retries against the fresher master.
+// Freshest master playlist URLs captured by the media probes (newest-first,
+// led by the report whose chosen candidate video is playing); handed to the
+// asset loader so a 403/404 media playlist in the same stream family retries
+// against the fresher master.
 - (instancetype)initWithURL:(NSURL *)URL
                       title:(nullable NSString *)title
              requestHeaders:(nullable NSDictionary<NSString *, NSString *> *)requestHeaders
@@ -41,6 +42,13 @@ NS_ASSUME_NONNULL_BEGIN
 // ({label, src}). Non-empty: a time-synced cue overlay renders over the
 // video; nil or empty keeps the player behavior identical (no overlay).
 @property (nonatomic, copy, nullable) NSArray<NSDictionary *> *subtitleTracks; // [{label, mode, cues:[{s,e,t}]} or {label, src}]
+
+// Host of the page the subtitleTracks were captured from (the candidate
+// report's pageURL host), set by BrowserVideoPlaybackCoordinator together
+// with subtitleTracks before presentation. The cue font scales per host:
+// kisskh-family pages render their own subtitles about half the size our TV
+// layout wants, so their overlay cues double up (see the player .m).
+@property (nonatomic, copy, nullable) NSString *subtitlePresentationHost;
 
 - (instancetype)initWithNibName:(nullable NSString *)nibNameOrNil bundle:(nullable NSBundle *)nibBundleOrNil NS_UNAVAILABLE;
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;

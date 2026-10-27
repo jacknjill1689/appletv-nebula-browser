@@ -30,7 +30,8 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
                              requestHeaders:(NSDictionary<NSString *, NSString *> *)requestHeaders
                                     cookies:(NSArray<NSHTTPCookie *> *)cookies
                   candidateMasterPlaylistURLs:(NSArray<NSURL *> *)candidateMasterPlaylistURLs
-                            subtitleFrameKey:(NSString *)subtitleFrameKey;
+                            subtitleFrameKey:(NSString *)subtitleFrameKey
+                              presentationHost:(NSString *)presentationHost;
 
 @end
 
@@ -149,60 +150,150 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
     return YES;
 }
 
-// Pick the best candidate inside one media-probe report (one frame). Order:
-// playlist-looking video src/currentSrc > playlist-looking captured URL >
-// any AVPlayer-openable video src > any captured http(s) URL.
+// Area of a probe video entry (client rect w*h; missing/zero when the probe
+// did not carry the rect keys).
+- (CGFloat)probeVideoAreaFromEntry:(NSDictionary *)videoEntry {
+    CGFloat w = [videoEntry[@"w"] isKindOfClass:[NSNumber class]] ? [(NSNumber *)videoEntry[@"w"] floatValue] : 0.0;
+    CGFloat h = [videoEntry[@"h"] isKindOfClass:[NSNumber class]] ? [(NSNumber *)videoEntry[@"h"] floatValue] : 0.0;
+    return w * h;
+}
+
+// First AVPlayer-openable (optionally HLS-playable) src/currentSrc of a probe
+// video entry; nil when the element exposes none (blob/MSE srcs are empty
+// strings in the probe payload).
+- (NSString *)probePlayableURLStringInEntry:(NSDictionary *)videoEntry hlsOnly:(BOOL)hlsOnly {
+    for (NSString *key in @[@"currentSrc", @"src"]) {
+        id sourceValue = videoEntry[key];
+        NSString *source = [sourceValue isKindOfClass:[NSString class]] ? sourceValue : nil;
+        if (![self isNativePlayableVideoURLString:source]) {
+            continue;
+        }
+        if (hlsOnly && ![self isHLSPlaylistURL:[NSURL URLWithString:source]]) {
+            continue;
+        }
+        return source;
+    }
+    return nil;
+}
+
+// The captured-playlist entries ordered NEWEST CAPTURE FIRST. The probe
+// script keeps the frame's capture list in append order and emits it into the
+// payload walked REVERSED (see buildProbePayload in BrowserWebView.m), so
+// forward payload order is already newest-first; when the probe carries
+// capture stamps (capturedTimes: URL -> epoch ms) the timestamp decides
+// explicitly and overrides position.
+- (NSArray<NSString *> *)capturedURLsNewestFirstFromReport:(NSDictionary *)report {
+    NSArray *captured = [report[@"captured"] isKindOfClass:[NSArray class]] ? report[@"captured"] : @[];
+    NSDictionary *capturedTimes = [report[@"capturedTimes"] isKindOfClass:[NSDictionary class]] ? report[@"capturedTimes"] : nil;
+    NSMutableArray<NSString *> *URLStrings = [NSMutableArray array];
+    for (id capturedValue in captured) {
+        if (![capturedValue isKindOfClass:[NSString class]] || [(NSString *)capturedValue length] == 0) {
+            continue;
+        }
+        if ([URLStrings containsObject:capturedValue]) {
+            continue;
+        }
+        [URLStrings addObject:capturedValue];
+    }
+    if (capturedTimes.count == 0) {
+        return URLStrings; // no stamps: rely on the newest-first payload order
+    }
+    [URLStrings sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        NSNumber *timeA = [capturedTimes[a] isKindOfClass:[NSNumber class]] ? capturedTimes[a] : nil;
+        NSNumber *timeB = [capturedTimes[b] isKindOfClass:[NSNumber class]] ? capturedTimes[b] : nil;
+        if (timeA == nil && timeB == nil) {
+            return NSOrderedSame; // keep payload order
+        }
+        if (timeA == nil) {
+            return NSOrderedDescending; // unstamped entries rank last (already newest-first)
+        }
+        if (timeB == nil) {
+            return NSOrderedAscending;
+        }
+        return [timeB compare:timeA]; // newest stamp first
+    }];
+    return URLStrings;
+}
+
+// Pick the best candidate inside one media-probe report (one frame). The
+// candidate MUST be the video element currently playing: on SPA episode
+// switches the OLD <video> stays in the DOM (still paused:false or not) in
+// DOM order ahead of the new one, so plain list order picks the stale
+// first-video. Ladder: playing (paused == false) largest-area video with an
+// HLS-playable src > largest-area video (regardless of paused) with an
+// HLS-playable src > newest captured HLS playlist > largest-area video with
+// any AVPlayer-openable src > newest captured openable URL.
 - (NSDictionary *)bestMediaProbeCandidateFromReport:(NSDictionary *)report {
     if (![report isKindOfClass:[NSDictionary class]]) {
         return nil;
     }
     NSString *pageURLString = [report[@"pageURL"] isKindOfClass:[NSString class]] ? report[@"pageURL"] : nil;
     NSArray *videos = [report[@"videos"] isKindOfClass:[NSArray class]] ? report[@"videos"] : @[];
-    NSArray *captured = [report[@"captured"] isKindOfClass:[NSArray class]] ? report[@"captured"] : @[];
 
+    // Split the probe videos into playing / all, each sorted by client-rect
+    // area descending (largest first) so the CURRENTLY playing and biggest
+    // element wins regardless of DOM position.
+    NSMutableArray<NSDictionary *> *playingVideos = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *allVideos = [NSMutableArray array];
     for (id videoObject in videos) {
         if (![videoObject isKindOfClass:[NSDictionary class]]) {
             continue;
         }
-        NSString *title = [((NSDictionary *)videoObject)[@"title"] isKindOfClass:[NSString class]] ? ((NSDictionary *)videoObject)[@"title"] : @"";
-        for (NSString *key in @[@"currentSrc", @"src"]) {
-            id sourceValue = ((NSDictionary *)videoObject)[key];
-            NSString *source = [sourceValue isKindOfClass:[NSString class]] ? sourceValue : nil;
-            if ([self isNativePlayableVideoURLString:source] && [self isHLSPlaylistURL:[NSURL URLWithString:source]]) {
-                return @{@"url": source, @"title": title, @"pageURL": pageURLString ?: @""};
-            }
+        NSDictionary *videoEntry = (NSDictionary *)videoObject;
+        [allVideos addObject:videoEntry];
+        id pausedValue = videoEntry[@"paused"];
+        if ([pausedValue isKindOfClass:[NSNumber class]] && [(NSNumber *)pausedValue boolValue] == NO) {
+            [playingVideos addObject:videoEntry];
+        }
+    }
+    NSComparator areaComparator = ^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        CGFloat areaA = [self probeVideoAreaFromEntry:a];
+        CGFloat areaB = [self probeVideoAreaFromEntry:b];
+        if (areaA > areaB) { return NSOrderedAscending; }
+        if (areaA < areaB) { return NSOrderedDescending; }
+        return NSOrderedSame;
+    };
+    [playingVideos sortUsingComparator:areaComparator];
+    [allVideos sortUsingComparator:areaComparator];
+
+    // Pass 1: the PLAYING largest-area video with an HLS-playable src.
+    for (NSDictionary *videoEntry in playingVideos) {
+        NSString *source = [self probePlayableURLStringInEntry:videoEntry hlsOnly:YES];
+        if (source != nil) {
+            NSString *title = [videoEntry[@"title"] isKindOfClass:[NSString class]] ? videoEntry[@"title"] : @"";
+            return @{@"url": source, @"title": title, @"pageURL": pageURLString ?: @""};
         }
     }
 
-    for (id capturedValue in captured) {
-        if (![capturedValue isKindOfClass:[NSString class]]) {
-            continue;
+    // Pass 2: no playing video — largest-area video regardless of paused.
+    for (NSDictionary *videoEntry in allVideos) {
+        NSString *source = [self probePlayableURLStringInEntry:videoEntry hlsOnly:YES];
+        if (source != nil) {
+            NSString *title = [videoEntry[@"title"] isKindOfClass:[NSString class]] ? videoEntry[@"title"] : @"";
+            return @{@"url": source, @"title": title, @"pageURL": pageURLString ?: @""};
         }
-        NSString *capturedURLString = (NSString *)capturedValue;
+    }
+
+    // Pass 3: captured playlists, NEWEST CAPTURE FIRST (kisskh uses hls.js so
+    // the video src is a blob and this is the path that actually fires there
+    // — an episode switch appends the new m3u8, the old capture must lose).
+    for (NSString *capturedURLString in [self capturedURLsNewestFirstFromReport:report]) {
         if ([self isNativePlayableVideoURLString:capturedURLString] && [self isHLSPlaylistURL:[NSURL URLWithString:capturedURLString]]) {
             return @{@"url": capturedURLString, @"title": @"", @"pageURL": pageURLString ?: @""};
         }
     }
 
-    for (id videoObject in videos) {
-        if (![videoObject isKindOfClass:[NSDictionary class]]) {
-            continue;
-        }
-        NSString *title = [((NSDictionary *)videoObject)[@"title"] isKindOfClass:[NSString class]] ? ((NSDictionary *)videoObject)[@"title"] : @"";
-        for (NSString *key in @[@"currentSrc", @"src"]) {
-            id sourceValue = ((NSDictionary *)videoObject)[key];
-            NSString *source = [sourceValue isKindOfClass:[NSString class]] ? sourceValue : nil;
-            if ([self isNativePlayableVideoURLString:source]) {
-                return @{@"url": source, @"title": title, @"pageURL": pageURLString ?: @""};
-            }
+    // Pass 4/5: any AVPlayer-openable video src (largest area first), then
+    // any newest-first captured http(s) URL.
+    for (NSDictionary *videoEntry in allVideos) {
+        NSString *source = [self probePlayableURLStringInEntry:videoEntry hlsOnly:NO];
+        if (source != nil) {
+            NSString *title = [videoEntry[@"title"] isKindOfClass:[NSString class]] ? videoEntry[@"title"] : @"";
+            return @{@"url": source, @"title": title, @"pageURL": pageURLString ?: @""};
         }
     }
 
-    for (id capturedValue in captured) {
-        if (![capturedValue isKindOfClass:[NSString class]]) {
-            continue;
-        }
-        NSString *capturedURLString = (NSString *)capturedValue;
+    for (NSString *capturedURLString in [self capturedURLsNewestFirstFromReport:report]) {
         if ([self isNativePlayableVideoURLString:capturedURLString]) {
             return @{@"url": capturedURLString, @"title": @"", @"pageURL": pageURLString ?: @""};
         }
@@ -211,20 +302,21 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
     return nil;
 }
 
-// Master playlists the probes captured (load-playlist-multi family), oldest
-// first so the asset loader can scan newest-last when a media playlist 403s:
-// the CDN rotates hosts, and a captured master is fresher than the one the
-// player was presented with.
-- (NSArray<NSURL *> *)candidateMasterPlaylistURLsFromReports:(NSArray<NSDictionary *> *)reports {
+// Master playlists the probes captured (load-playlist-multi family), NEWEST
+// CAPTURE FIRST so the asset loader retries against the freshest master
+// first: the CDN rotates hosts and kisskh keeps BOTH episodes' m3u8s
+// captured, so the ladder must lead with the newest capture (and with the
+// reports whose chosen candidate video is PLAYING, passed first by the
+// caller), not with the stale first-video's master.
+- (NSArray<NSURL *> *)candidateMasterPlaylistURLsFromOrderedReports:(NSArray<NSDictionary *> *)orderedReports {
     NSMutableArray<NSURL *> *candidates = [NSMutableArray array];
     NSMutableArray<NSString *> *seen = [NSMutableArray array];
-    for (NSDictionary *report in [reports reverseObjectEnumerator]) { // oldest first
-        NSArray *captured = [report[@"captured"] isKindOfClass:[NSArray class]] ? report[@"captured"] : @[];
-        for (id capturedValue in captured) {
-            if (![capturedValue isKindOfClass:[NSString class]]) {
-                continue;
-            }
-            NSString *capturedURLString = (NSString *)capturedValue;
+    // The incoming reports array is newest-first (freshMediaProbeReportsYoungerThan:
+    // sorts by the receive stamp — verified), and the caller moves the report
+    // whose candidate was chosen to the front; collect in that order and
+    // dedupe preserving it (first occurrence = newest capture wins).
+    for (NSDictionary *report in orderedReports) {
+        for (NSString *capturedURLString in [self capturedURLsNewestFirstFromReport:report]) {
             NSString *lowercaseURLString = capturedURLString.lowercaseString;
             if (![lowercaseURLString containsString:@"/playlist/"] || ![lowercaseURLString containsString:@"load-playlist"]) {
                 continue;
@@ -273,12 +365,24 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
 
 - (BOOL)presentNativePlayerFromMediaProbesSilentlyAllowingReportAge:(NSTimeInterval)age {
     NSArray<NSDictionary *> *reports = [self.host.browserWebView freshMediaProbeReportsYoungerThan:age];
-    NSArray<NSURL *> *candidateMasterPlaylistURLs = [self candidateMasterPlaylistURLsFromReports:reports];
     for (NSDictionary *report in reports) { // newest first
         NSDictionary *candidate = [self bestMediaProbeCandidateFromReport:report];
         if (candidate == nil) {
             continue;
         }
+        // Master-playlist ladder built AFTER the selection, with the chosen
+        // report moved to the front: when MULTIPLE distinct master playlist
+        // URLs exist across reports (kisskh keeps BOTH episodes' m3u8s
+        // captured), the one belonging to the report whose chosen candidate
+        // video is playing must lead, then the remaining reports newest-first.
+        NSMutableArray<NSDictionary *> *orderedReports = [NSMutableArray arrayWithCapacity:reports.count];
+        [orderedReports addObject:report];
+        for (NSDictionary *otherReport in reports) {
+            if (otherReport != report) {
+                [orderedReports addObject:otherReport];
+            }
+        }
+        NSArray<NSURL *> *candidateMasterPlaylistURLs = [self candidateMasterPlaylistURLsFromOrderedReports:orderedReports];
         NSString *candidateURLString = candidate[@"url"];
         NSURL *videoURL = candidateURLString.length > 0 ? [NSURL URLWithString:candidateURLString] : nil;
         if (videoURL == nil) {
@@ -306,7 +410,7 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
                 ? [probePageURL.host stringByAppendingString:probePageURL.path ?: @""]
                 : pageURLString;
         }
-        [self forcePresentNativeVideoPlayerForURL:videoURL title:title requestHeaders:requestHeaders cookies:nil candidateMasterPlaylistURLs:candidateMasterPlaylistURLs subtitleFrameKey:subtitleFrameKey];
+        [self forcePresentNativeVideoPlayerForURL:videoURL title:title requestHeaders:requestHeaders cookies:nil candidateMasterPlaylistURLs:candidateMasterPlaylistURLs subtitleFrameKey:subtitleFrameKey presentationHost:(pageURLString.length > 0 ? [NSURL URLWithString:pageURLString].host : nil)];
         NSLog(@"[NativeVideoPlayer] media probe presented url=%@ frame=%@", candidateURLString, pageURLString ?: @"");
         // The web view stamps each stored report with its receive time
         // (kBrowserMediaProbeTimestampKey in BrowserWebView.m, kept in the
@@ -518,7 +622,8 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
                                requestHeaders:requestHeaders
                                       cookies:cookies
                   candidateMasterPlaylistURLs:candidateMasterPlaylistURLs
-                            subtitleFrameKey:nil];
+                            subtitleFrameKey:nil
+                              presentationHost:nil];
 }
 
 // subtitleFrameKey: non-nil only on the media-probe paths — the frame key of
@@ -532,7 +637,8 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
                              requestHeaders:(NSDictionary<NSString *, NSString *> *)requestHeaders
                                     cookies:(NSArray<NSHTTPCookie *> *)cookies
                   candidateMasterPlaylistURLs:(NSArray<NSURL *> *)candidateMasterPlaylistURLs
-                            subtitleFrameKey:(NSString *)subtitleFrameKey {
+                            subtitleFrameKey:(NSString *)subtitleFrameKey
+                              presentationHost:(NSString *)presentationHost {
     if (URL == nil) {
         return;
     }
@@ -552,10 +658,14 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
         [weakSelf presentNativePlayerFromMediaProbes];
     };
     if (subtitleFrameKey.length > 0) {
+        // Host of the candidate report's pageURL: the subtitle overlay scales
+        // its cue font per site (kisskh-family doubles up).
+        NSString *subtitlePresentationHost = presentationHost;
         [self.host.browserWebView extractSubtitleTracksForFrameKey:subtitleFrameKey completion:^(NSArray<NSDictionary *> *subtitleTracks) {
             // Main thread (extract contract): set before presentation; an
             // empty array keeps the player identical to the no-overlay path.
             playerViewController.subtitleTracks = subtitleTracks;
+            playerViewController.subtitlePresentationHost = subtitlePresentationHost;
             [weakSelf.host browserPresentViewController:playerViewController];
         }];
         return;

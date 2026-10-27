@@ -710,7 +710,12 @@ static NSString *BrowserMediaEngineUserScriptWithFlags(BOOL hlsEnabled, BOOL net
                 "var index = list.indexOf(absolute);"
                 "if (index !== -1) { list.splice(index, 1); }"
                 "list.push(absolute);"
-                "while (list.length > 12) { list.shift(); }"
+                // Capture stamp (epoch ms, refreshed on re-capture): the probe
+                // payload carries it per URL so the takeover can prefer the
+                // NEWEST capture explicitly when choosing a playlist.
+                "window.__browserCapturedMediaTimes = window.__browserCapturedMediaTimes || {};"
+                "window.__browserCapturedMediaTimes[absolute] = Date.now();"
+                "while (list.length > 12) { var dropped = list.shift(); if (window.__browserCapturedMediaTimes[dropped]) { delete window.__browserCapturedMediaTimes[dropped]; } }"
             "} catch (error) {}"
         "}"
         "try {"
@@ -790,7 +795,7 @@ static NSString *BrowserMediaEngineUserScriptWithFlags(BOOL hlsEnabled, BOOL net
                     "} catch (error) { return ''; }"
                 "}"
                 "function buildProbePayload() {"
-                    "var payload = {pageURL: clipProbeString(document.location.href), videos: [], captured: []};"
+                    "var payload = {pageURL: clipProbeString(document.location.href), videos: [], captured: [], capturedTimes: {}};"
                     "try {"
                         "var nodes = document.querySelectorAll('video');"
                         "for (var i = 0; i < nodes.length && payload.videos.length < 4; i += 1) {"
@@ -799,6 +804,9 @@ static NSString *BrowserMediaEngineUserScriptWithFlags(BOOL hlsEnabled, BOOL net
                                 "src: probeHttpURL(v.src),"
                                 "currentSrc: probeHttpURL(v.currentSrc),"
                                 "paused: v.paused === true,"
+                                "currentTime: (typeof v.currentTime === 'number' && isFinite(v.currentTime)) ? v.currentTime : 0,"
+                                "w: (function() { try { return v.getBoundingClientRect().width || 0; } catch (error) { return 0; } })(),"
+                                "h: (function() { try { return v.getBoundingClientRect().height || 0; } catch (error) { return 0; } })(),"
                                 "duration: (typeof v.duration === 'number' && isFinite(v.duration)) ? v.duration : 0,"
                                 "title: clipProbeString(v.title),"
                                 "poster: probeHttpURL(v.poster)"
@@ -808,9 +816,19 @@ static NSString *BrowserMediaEngineUserScriptWithFlags(BOOL hlsEnabled, BOOL net
                     "try {"
                         "var probeList = window.__browserCapturedMediaURLs;"
                         "if (Array.isArray(probeList)) {"
+                            "var capturedTimes = window.__browserCapturedMediaTimes || {};"
+                            // probeList is the frame's append-order capture list
+                            // (oldest first); this walks it REVERSED, so the
+                            // payload's captured[] is NEWEST-CAPTURE-FIRST, and
+                            // capturedTimes carries each URL's capture stamp.
                             "for (var j = probeList.length - 1; j >= 0 && payload.captured.length < 8; j -= 1) {"
-                                "var capturedURL = probeHttpURL(probeList[j]);"
-                                "if (capturedURL) { payload.captured.push(capturedURL); }"
+                                "var capturedKey = String(probeList[j] || '');"
+                                "var capturedURL = probeHttpURL(capturedKey);"
+                                "if (capturedURL) {"
+                                    "payload.captured.push(capturedURL);"
+                                    "var capturedTime = capturedTimes[capturedKey] || capturedTimes[capturedURL] || 0;"
+                                    "if (capturedTime) { payload.capturedTimes[capturedURL] = capturedTime; }"
+                                "}"
                             "}"
                         "}"
                     "} catch (error) {}"
