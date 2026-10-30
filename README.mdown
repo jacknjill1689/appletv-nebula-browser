@@ -1,7 +1,21 @@
-Nebula Browser
+Nebula Browser — jacknjill1689's fork
 =============
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/T1G020UH4L)
+**What's different in this fork:** this is my personal fork focused on hard video playback — the stuff that happens when real-world video pages meet a strict browser engine. It got here the fun way: I "vibe coded" it as a hobby, pair-driving with an AI agent ([Hermes](https://hermes-agent.nousresearch.com) by Nous Research) — I describe what annoys me on my couch, we dig through device logs together, the agent writes most of the code, and my living room Apple TV is the test lab. No grand plan, lots of coffee-level focus sessions, and it genuinely made my old 4th-generation Apple TV useful again — no need to buy newer hardware, which makes me happy twice over. 🛋️📺
+
+In plain terms, this fork adds:
+
+- **Full screen that survives real pages** — a plain-asset native player that follows a page's media through redirects and hotlink-guarded CDNs (correct User-Agent/Referer policy, no cross-host headers on redirects).
+- **Clean handover both ways** — page video opens in the native player; pressing Menu hands playback back to the page without a reload, with a short escalating re-attach for live streams whose edge momentarily stalls.
+- **Single-decoder rule** — while the native player owns playback, the page's media elements are held paused; some pages auto-resume after any pause, which used to run two decoders at once and stutter 1 GB devices.
+- **Subtitles survive full screen** — WebVTT tracks rendered by the page carry into the native player (yellow with a black outline, sized per site).
+- **Clicks that pages can't ghost** — generic page activations are real touches through the OS event pipeline, so cross-origin frames and modal walls respond to the remote like they do in Safari; scripted-event fallback kept.
+- **Heavy pages can't freeze the remote** — interactive hit-tests degrade in 350 ms instead of stalling the main thread for seconds.
+- A favorites-grid landing page as the default home (upstream meanwhile shipped its own excellent Favorites home — both are toggleable in Settings; the fork's variant lives on the `contrib/*` branches).
+
+**Intended use:** a browser is neutral technology — this fork is meant for content you are legally entitled to view. It is not intended for, and I do not endorse, accessing copyrighted material without authorization. All trademarks and service names belong to their owners. I keep the changes generic web-standards fixes, not site-specific hacks.
+
+Upstream: [alan-maldonado/appletv-nebula-browser](https://github.com/alan-maldonado/appletv-nebula-browser) — a much better browser than its category deserves. Go show Alan some love there; the support links are his, and the good ideas are mostly his too.
 
 ![Browsing on Apple TV](/screen01.png?raw=true "Nebula Browser on Apple TV")
 
@@ -24,27 +38,24 @@ Nebula Browser
 - Sign-ins are kept between launches (cookies and site storage are saved).
 - Multiple search engines, page zoom, and privacy options.
 
-Nebula Browser was developed with the help of AI ([Claude Code](https://claude.com/claude-code)): the full screen video player transport controls (fast-forward, scrubbing, transport bar, resume), the back/double-back navigation, the arrow button shortcuts, the per-page video fullscreen, the privacy options, and many input-handling fixes were built in collaboration with it. It is based on the open-source *tvOS Browser* by Steven Troughton-Smith and Jip van Akker.
-
 This code is provided as is with no warranty or liability. Use at your own risk and do ***not*** distribute builds of this project on the App Store.
 
 
-Support
+Credits
 =============
 
-Nebula Browser is free and open source — you build it yourself from this repo, nothing to buy. If you enjoy it and want to support ongoing development and the features the community asks for, you can buy me a coffee:
+Nebula Browser was created by **Alan Maldonado**, developed with the help of AI ([Claude Code](https://claude.com/claude-code)): the full screen video player transport controls (fast-forward, scrubbing, transport bar, resume), the back/double-back navigation, the arrow button shortcuts, the per-page video fullscreen, the privacy options, the Nebula Remote panel, and many input-handling fixes were built in collaboration with it. It is based on the open-source *tvOS Browser* by Steven Troughton-Smith and Jip van Akker.
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/T1G020UH4L)
+The playback-hardening changes in this fork were vibe coded as a hobby in collaboration with **Hermes Agent (Nous Research)** — see the intro. Original authorship belongs to Alan and the tvOS Browser authors; this fork adds to their work, it does not rename or rebrand it.
 
-![Support Nebula Browser](/screen05.png?raw=true "Support screen with donation QR")
-
-Have an idea or a feature request? Open an issue or drop it on the Ko-fi page. Thank you for the support! 🌌
+Feature ideas belong at [alan-maldonado/appletv-nebula-browser](https://github.com/alan-maldonado/appletv-nebula-browser). Thank you Alan! 🌌
 
 
 How to Install Nebula Browser
 =============
 
-There is ***no*** ready to use binary available on this repository. You need to install Xcode and build/run the project yourself.
+Upstream ships no binary; building from Xcode (as described below) is the general path. This fork additionally publishes **developer-signed builds** under Releases — they install only on devices registered in the signer's provisioning profile (e.g. `xcrun devicectl device install app --device <AppleTV-UDID> <file>.ipa`). Not notarized, not for the App Store.
+
 To install this app, connect your Apple TV to your macOS computer via WiFi (or USB on older devices). Open this project in Xcode and install to your Apple TV.
 Connecting to your Apple TV wirelessly: http://www.redmondpie.com/how-to-wirelessly-connect-apple-tv-4k-to-xcode-on-mac/.
 
@@ -74,7 +85,9 @@ Favorites home:
 - Press the touch area to open the focused favorite in the current tab, Play/Pause to open it in a new tab, Menu to close the grid and return to the page you were on.
 
 Video:
-- Videos play inline on the page. Double-tap a video, or use the page's own full screen control, to open it.
+- Videos play inline on the page. Double-tap a video, **hold Play/Pause**, or use the page's own full screen control to open it in the built-in full screen player.
+- While in the full screen player, press **Menu** to hand playback back to the page — the page video re-attaches and keeps playing, no reload.
+- **WebVTT subtitles** shown by the page carry into the full screen player automatically (yellow with outline; some sites render them larger).
 - When a direct media URL is available it opens in the built-in full screen player; otherwise it expands within the page.
 - Full screen player: press Right to fast-forward at 2x → 32x, Left to slow down, Play/Pause to resume from that point. Left/Right while paused skip ±10s. Swipe to scrub (quick swipes accelerate). Back cancels a fast-forward/scrub and returns to where you were. Videos resume where you left off.
 - A "Full Screen Player" option in Settings can make videos always open in the built-in player instead of inline.
