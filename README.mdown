@@ -1,7 +1,9 @@
 Nebula Browser
 =============
 
-Fork of [alan-maldonado/appletv-nebula-browser](https://github.com/alan-maldonado/appletv-nebula-browser) with playback-engine work for real-world streaming sites (see Credits at the bottom for authorship of the upstream project).
+Fork of [alan-maldonado/appletv-nebula-browser](https://github.com/alan-maldonado/appletv-nebula-browser) focused on standards-based video playback: more reliable HTML5/HLS video in and out of full screen, WebVTT subtitles, and page interactions.
+
+**Intended use:** a browser is neutral technology — this fork is meant for content you are legally entitled to view. It is not intended for, and its authors do not endorse, accessing copyrighted material without authorization. All trademarks and service names belong to their respective owners.
 
 ![Browsing on Apple TV](/screen01.png?raw=true "Nebula Browser on Apple TV")
 
@@ -17,7 +19,7 @@ Fork of [alan-maldonado/appletv-nebula-browser](https://github.com/alan-maldonad
 - Browser tabs with a focus-driven overview.
 - Modern Liquid Glass UI with selectable accent themes (the app icon follows the theme).
 - A built-in full screen video player with fast-forward, scrubbing and a transport bar.
-- In-player WebVTT subtitles, trusted clicks for human-check modals, and a favorites-grid landing page (this fork).
+- In-player WebVTT subtitles, real-event page clicks that work inside sandboxed frames, and a favorites-grid landing page (this fork).
 - Multiple search engines, page zoom, and privacy options.
 
 This code is provided as is with no warranty or liability. Use at your own risk and do ***not*** distribute builds of this project on the App Store.
@@ -68,7 +70,16 @@ Video:
 - **WebVTT subtitles** shown by the page carry into the full screen player automatically (yellow with outline; some sites render them larger).
 - Full screen player: press Right to fast-forward at 2x → 32x, Left to slow down, Play/Pause to resume from that point. Left/Right while paused skip ±10s. Swipe to scrub (quick swipes accelerate). Back cancels a fast-forward/scrub and returns to where you were. Videos resume where you left off.
 - A "Full Screen Player" option in Settings can make videos always open in the built-in player instead of inline (off by default).
-- Buttons, modals and human-check widgets respond to real clicks from the remote — including inside cross-origin frames.
+- Buttons, modals and in-frame controls respond to real clicks from the remote — including inside cross-origin frames that scripted clicks cannot reach.
+
+Streaming playback compatibility (this fork):
+These are generic web-standards fixes — they help the browser handle well-behaved and badly-behaved video pages alike, for content you are entitled to view:
+- **Full-screen handover:** opening a page video into the native player, and handing playback back to the page on Menu, without a page reload; a short escalating re-attach recovers live streams whose edge momentarily stalls.
+- **Single-decoder rule:** while the native player owns playback the page's media elements are held paused — some pages auto-resume after any pause, which used to run two decoders at once and stutter 1 GB devices.
+- **Header policy for media requests:** correct User-Agent/Referer handling, and no cross-host credential-style headers on redirects, which standards-compliant CDNs require.
+- **Live media handling:** no-cache playlist fetches, correct handling of byte-range and mislabeled media segments, so HLS live windows advance properly.
+- **Subtitles:** WebVTT subtitle tracks shown by a page are carried into the native full-screen player.
+- **Responsiveness:** interactive page hit-testing degrades fast on pathologically heavy pages instead of delaying the remote.
 
 Settings (Side menu) include:
 - Navigation: home page (default is a favorites-grid landing; any page can be set as home, reset from the menu), favorites, history, tabs, new tab, arrow shortcuts on/off.
