@@ -1,4 +1,5 @@
 #import "BrowserMenuCoordinator.h"
+#import "BrowserPageActionCoordinator.h"
 #import "BrowserPreferencesStore.h"
 #import "BrowserWebView.h"
 
@@ -1193,6 +1194,14 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
     }];
 }
 
+- (BrowserAdvancedMenuItem *)sendEnterKeyMenuItem {
+    return [self advancedMenuItemWithTitle:@"Send Enter (Return)"
+                                     style:UIAlertActionStyleDefault
+                                   handler:^{
+        [self.host.browserPageActionCoordinator submitFocusedPageField];
+    }];
+}
+
 - (BrowserAdvancedMenuItem *)setCurrentPageAsHomePageMenuItem {
     return [self advancedMenuItemWithTitle:@"Set Current Page As Home Page"
                                      style:UIAlertActionStyleDefault
@@ -1540,6 +1549,7 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
         [BrowserAdvancedMenuSection sectionWithTitle:@"Navigation"
                                                items:@[
             [self homePageMenuItem],
+            [self sendEnterKeyMenuItem],
             [self setCurrentPageAsHomePageMenuItem],
             [self resetHomePageMenuItem],
             [self favoritesMenuItem],

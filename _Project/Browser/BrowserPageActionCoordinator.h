@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)browserPageActionCoordinatorPresentViewController:(UIViewController *)viewController;
 - (BOOL)browserPageActionCoordinatorCreateNewTabWithRequest:(NSURLRequest *)request;
 - (UIView *)browserPageActionCoordinatorContainerView;
+@property (nonatomic, readonly) BrowserWebView *browserWebView;
 // Cursor aim point converted to window coordinates, used as the screen
 // point for a native (trusted) touch click.
 - (CGPoint)browserPageActionCoordinatorWindowPoint;
@@ -30,6 +31,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSString *)hoverStateAtDOMPoint:(CGPoint)point webView:(BrowserWebView *)webView;
 - (BOOL)handlePageSelectionAtDOMPoint:(CGPoint)point webView:(BrowserWebView *)webView;
+// Enter (Return): commits the open keyboard prompt's text and submits the
+// field's form, or dispatches an Enter to the focused page element.
+- (void)submitFocusedPageField;
+- (void)sendReturnKeyToPage;
 
 @end
 
