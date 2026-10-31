@@ -1,11 +1,13 @@
 #import <UIKit/UIKit.h>
 #import "BrowserWebView.h"
 
+@class BrowserPageActionCoordinator;
 @class BrowserPreferencesStore;
 
 @protocol BrowserMenuCoordinatorHost <NSObject>
 
 @property (nonatomic, readonly) BrowserWebView *browserWebView;
+@property (nonatomic, readonly) BrowserPageActionCoordinator *browserPageActionCoordinator;
 @property (nonatomic, copy) NSString *browserPreviousURL;
 @property (nonatomic) NSUInteger browserTextFontSize;
 @property (nonatomic) BOOL browserFullscreenVideoPlaybackEnabled;

@@ -765,6 +765,13 @@ static UIColor *kTextColor(void) {
         }
     }
 
+    // "Send Enter (Return)": submit the page's focused form (Google search etc.).
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Send Enter (Return)"
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(__unused UIAlertAction *action) {
+        [self.pageActionCoordinator submitFocusedPageField];
+    }]];
+
     [alertController addAction:[UIAlertAction actionWithTitle:[self popupBlockerToggleTitle]
                                                         style:UIAlertActionStyleDefault
                                                       handler:^(__unused UIAlertAction *action) {
@@ -880,6 +887,10 @@ static UIColor *kTextColor(void) {
 
 - (BrowserWebView *)browserWebView {
     return self.webview;
+}
+
+- (BrowserPageActionCoordinator *)browserPageActionCoordinator {
+    return self.pageActionCoordinator;
 }
 
 - (NSString *)browserPreviousURL {

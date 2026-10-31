@@ -6,7 +6,27 @@
 #import "BrowserVideoPlaybackCoordinator.h"
 #import "BrowserWebView.h"
 
-@interface BrowserPageActionCoordinator ()
+// Focused-field Enter: fire the key events on document.activeElement (drives
+// JS-suggest search boxes like Google) and submit the containing form via
+// requestSubmit(). No blind fallback click — that risks double-submits.
+static NSString * const kBrowserSendReturnKeyScript = @"(function(){"
+    "  try {"
+    "    var el = document.activeElement;"
+    "    if (!el || el === document.body) return; "
+    "    var d = el.ownerDocument || document;"
+    "    function fire(t){ try { el.dispatchEvent(new KeyboardEvent(t, {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true})); } catch(e){} }"
+    "    fire('keydown'); fire('keypress'); fire('keyup');"
+    "    var f = el.form || null;"
+    "    if (!f) { var p = el; var guard=0; while (p && p.tagName !== 'FORM' && guard++ < 12) p = p.parentElement; if (p && p.tagName === 'FORM') f = p; }"
+    "    if (f) { try { if (f.requestSubmit) f.requestSubmit(); else f.submit(); } catch(e){} }"
+    "  } catch(e){}"
+    "})()";
+
+@interface BrowserPageActionCoordinator () {
+    // DOM point of the editable field the keyboard prompt was opened on, so
+    // Enter can commit + submit through the existing keyed-at-point path.
+    CGPoint _activeEditablePoint;
+}
 
 @property (nonatomic, weak) id<BrowserPageActionCoordinatorHost> host;
 @property (nonatomic) BrowserDOMInteractionService *domInteractionService;
@@ -118,6 +138,7 @@
     hiddenField.text = initialValue;
     hiddenField.returnKeyType = UIReturnKeyDone;
     [container addSubview:hiddenField];
+    _activeEditablePoint = point;
     self.activeEditableField = hiddenField;
 
     __weak typeof(self) weakSelf = self;
@@ -163,6 +184,29 @@
                                                                           "}"
                                                                           "%@"
                                                                           "return 'true';", escapedText, submitClause]];
+}
+
+- (void)submitFocusedPageField {
+    UITextField *field = self.activeEditableField;
+    if (field != nil) {
+        // Same teardown as the prompt's EditingDidEnd handler, but commit with
+        // submitForm:YES so the current value writes AND the form submits.
+        CGPoint point = _activeEditablePoint;
+        [field resignFirstResponder];
+        self.activeEditableField = nil;
+        [self commitEditableText:field.text atPoint:point webView:self.host.browserWebView submitForm:YES];
+        [field removeFromSuperview];
+        return;
+    }
+    [self sendReturnKeyToPage];
+}
+
+- (void)sendReturnKeyToPage {
+    // MAIN frame plus every recent probe frame; only the frame holding the
+    // focused field acts, the script is harmless elsewhere.
+    [self.host.browserWebView evaluateJavaScriptStringAsync:kBrowserSendReturnKeyScript];
+    [self.host.browserWebView evaluateJavaScriptOnRecentProbeFrames:kBrowserSendReturnKeyScript];
+    NSLog(@"[Menu] Enter sent (focused-field submit)");
 }
 
 - (BOOL)handlePageSelectionAtDOMPoint:(CGPoint)point webView:(BrowserWebView *)webView {
