@@ -131,6 +131,8 @@ typedef NSString * _Nullable (^BrowserAdvancedMenuItemAdjustHandler)(NSInteger d
 @property (nonatomic) UIImageView *previewImageView;
 @property (nonatomic) UIVisualEffectView *explanationCardView;
 @property (nonatomic) UILabel *explanationLabel;
+// Runs when the top Enter/Return button is activated (wired by the coordinator).
+@property (nonatomic, copy, nullable) void (^enterAction)(void);
 
 @end
 
@@ -240,6 +242,22 @@ typedef NSString * _Nullable (^BrowserAdvancedMenuItemAdjustHandler)(NSInteger d
     [panelView.contentView addSubview:tableView];
     self.tableView = tableView;
 
+    // Prominent Enter/Return button pinned to the top of the panel, above the
+    // list rows. It replaces the old "Send Enter (Return)" menu item.
+    UIButton *enterButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    enterButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [enterButton setTitle:@"Enter/Return" forState:UIControlStateNormal];
+    enterButton.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightSemibold];
+    [enterButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [enterButton setTitleColor:UIColor.whiteColor forState:UIControlStateFocused];  // focus keeps contrast
+    enterButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    enterButton.layer.cornerRadius = 16.0;
+    enterButton.layer.borderWidth = 0;
+    enterButton.contentEdgeInsets = UIEdgeInsetsMake(12.0, 20.0, 12.0, 20.0);
+    // NB: UIButton has no `allowsFocus` on the tvOS SDK (focusable by default).
+    [enterButton addTarget:self action:@selector(topEnterButtonPressed) forControlEvents:UIControlEventTouchUpInside];
+    [self.panelView.contentView addSubview:enterButton];
+
     self.panelTrailingConstraint = [panelView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor
                                                                              constant:self.panelWidth + 32.0];
 
@@ -263,7 +281,14 @@ typedef NSString * _Nullable (^BrowserAdvancedMenuItemAdjustHandler)(NSInteger d
         [separator.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:20.0],
         [separator.heightAnchor constraintEqualToConstant:1.0],
 
-        [tableView.topAnchor constraintEqualToAnchor:separator.bottomAnchor constant:12.0],
+        // Mirror the table's horizontal insets (panel +/- 16) so the button
+        // spans exactly the same width as the rows below it.
+        [enterButton.leadingAnchor constraintEqualToAnchor:panelView.leadingAnchor constant:16.0],
+        [enterButton.trailingAnchor constraintEqualToAnchor:panelView.trailingAnchor constant:-16.0],
+        [enterButton.centerXAnchor constraintEqualToAnchor:panelView.centerXAnchor],
+        [enterButton.topAnchor constraintEqualToAnchor:separator.bottomAnchor constant:14.0],
+
+        [tableView.topAnchor constraintEqualToAnchor:enterButton.bottomAnchor constant:10.0],
         [tableView.leadingAnchor constraintEqualToAnchor:panelView.leadingAnchor constant:16.0],
         [tableView.trailingAnchor constraintEqualToAnchor:panelView.trailingAnchor constant:-16.0],
         [tableView.bottomAnchor constraintEqualToAnchor:footerLabel.topAnchor constant:-8.0],
@@ -565,6 +590,17 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
     }];
 }
 
+// The panel's top Enter/Return button: dismiss first, then run the wired
+// action, mirroring how menu row activation is handled.
+- (void)topEnterButtonPressed {
+    void (^enterAction)(void) = self.enterAction;
+    [self dismissMenuWithCompletion:^{
+        if (enterAction != nil) {
+            enterAction();
+        }
+    }];
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     BrowserAdvancedMenuSection *section = self.sections[(NSUInteger)indexPath.section];
@@ -692,6 +728,11 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
     BrowserAdvancedMenuViewController *menuViewController = [[BrowserAdvancedMenuViewController alloc] initWithTitle:menuTitle
                                                                                                             sections:[self advancedMenuSections]
                                                                                                           footerText:[self advancedMenuFooterText]];
+    // Every menu gets the top Enter/Return button wired to the page-action
+    // coordinator (the block body from the removed sendEnterKeyMenuItem).
+    menuViewController.enterAction = ^{
+        [self.host.browserPageActionCoordinator submitFocusedPageField];
+    };
     [self.host browserPresentViewController:menuViewController];
 }
 
@@ -1194,14 +1235,6 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
     }];
 }
 
-- (BrowserAdvancedMenuItem *)sendEnterKeyMenuItem {
-    return [self advancedMenuItemWithTitle:@"Send Enter (Return)"
-                                     style:UIAlertActionStyleDefault
-                                   handler:^{
-        [self.host.browserPageActionCoordinator submitFocusedPageField];
-    }];
-}
-
 - (BrowserAdvancedMenuItem *)setCurrentPageAsHomePageMenuItem {
     return [self advancedMenuItemWithTitle:@"Set Current Page As Home Page"
                                      style:UIAlertActionStyleDefault
@@ -1549,7 +1582,6 @@ withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
         [BrowserAdvancedMenuSection sectionWithTitle:@"Navigation"
                                                items:@[
             [self homePageMenuItem],
-            [self sendEnterKeyMenuItem],
             [self setCurrentPageAsHomePageMenuItem],
             [self resetHomePageMenuItem],
             [self favoritesMenuItem],

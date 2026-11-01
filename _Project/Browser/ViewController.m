@@ -721,6 +721,14 @@ static UIColor *kTextColor(void) {
                                                                              message:@""
                                                                       preferredStyle:UIAlertControllerStyleAlert];
 
+    // "Enter/Return": submit the page's focused form (Google search etc.).
+    // First non-cancel action so it leads the Quick Menu.
+    [alertController addAction:[UIAlertAction actionWithTitle:@"Enter/Return"
+                                                        style:UIAlertActionStyleDefault
+                                                      handler:^(__unused UIAlertAction *action) {
+        [self.pageActionCoordinator submitFocusedPageField];
+    }]];
+
     if (self.webview.canGoForward) {
         [alertController addAction:[UIAlertAction actionWithTitle:@"Go Forward"
                                                             style:UIAlertActionStyleDefault
@@ -764,13 +772,6 @@ static UIColor *kTextColor(void) {
             }]];
         }
     }
-
-    // "Send Enter (Return)": submit the page's focused form (Google search etc.).
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Send Enter (Return)"
-                                                        style:UIAlertActionStyleDefault
-                                                      handler:^(__unused UIAlertAction *action) {
-        [self.pageActionCoordinator submitFocusedPageField];
-    }]];
 
     [alertController addAction:[UIAlertAction actionWithTitle:[self popupBlockerToggleTitle]
                                                         style:UIAlertActionStyleDefault
