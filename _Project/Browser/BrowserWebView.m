@@ -1002,6 +1002,25 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                 "return !!intentOrigin && intentOrigin === popupOrigin;"
             "} catch (error) { return false; }"
         "}"
+        "function popupFollowClickedAnchor(url) {"
+            "try {"
+                // When an ad handler hijacks a link click (preventDefault +
+                // window.open to an ad host), the user still meant to follow
+                // the link. Re-issue that navigation in this tab so the click
+                // lands where they asked instead of doing nothing.
+                "if (!popupIsTopFrame()) { return; }"
+                "var intent = window.__browserLastAnchorIntent;"
+                "if (!intent) { return; }"
+                "if ((popupNow() - intent.ts) > 800) { return; }"
+                "var target = String(intent.href || '');"
+                "if (!target || !popupSameOriginToTop(target)) { return; }"
+                "try {"
+                    "var here = String(window.location.href || '').split('#')[0];"
+                    "if (here && here === target.split('#')[0]) { return; }"
+                "} catch (error) {}"
+                "setTimeout(function() { try { window.location.href = target; } catch (error) {} }, 0);"
+            "} catch (error) {}"
+        "}"
         "function popupShouldBlock(url) {"
             "try {"
                 // Never block: blob:, same-origin to the top document, or an
@@ -1048,6 +1067,7 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                     "try {"
                         "if (popupShouldBlock(url)) {"
                             "postPopupBlock(url, false);"
+                            "popupFollowClickedAnchor(url);"
                             "return null;"
                         "}"
                     "} catch (error) {}"

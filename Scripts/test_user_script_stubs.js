@@ -132,14 +132,39 @@ check('window.open allowed after an anchor click to the same origin', () => {
 });
 
 // 2d. Anchor click to one origin, popup to another -> blocked (mismatch is
-//     the hijack shape).
-check('window.open blocked when the popup origin differs from the clicked anchor', () => {
+//     the hijack shape), and the link the user actually clicked is followed
+//     in this tab (ad handlers preventDefault, so nothing would navigate).
+check('blocked popup after an anchor click navigates to the clicked link', () => {
     const sandbox = makeSandbox({ crossFrame: false });
     sandbox.run();
-    sandbox.fireWindow('click', fakeAnchor('https://site.example.test/story'));
-    const result = sandbox.window.open('https://ad.example.test/popup?id=3');
-    assert.strictEqual(result, null);
-    assert.deepStrictEqual(sandbox.openedURLs, []);
+    const href = 'https://embed.example.test/player/football/abc';
+    const realSetTimeout = global.setTimeout;
+    try {
+        global.setTimeout = (fn) => { fn(); return 0; };
+        sandbox.fireWindow('click', fakeAnchor(href));
+        const result = sandbox.window.open('https://ad.example.test/popup?id=3');
+        assert.strictEqual(result, null);
+        assert.deepStrictEqual(sandbox.openedURLs, []);
+        assert.strictEqual(sandbox.window.location.href, href, 'the clicked link must be followed in-tab');
+    } finally {
+        global.setTimeout = realSetTimeout;
+    }
+});
+
+// 2e. No navigation when the click did not land on a link.
+check('blocked popup without an anchor click leaves the page alone', () => {
+    const sandbox = makeSandbox({ crossFrame: false });
+    sandbox.run();
+    const before = sandbox.window.location.href;
+    const realSetTimeout = global.setTimeout;
+    try {
+        global.setTimeout = (fn) => { fn(); return 0; };
+        sandbox.fireWindow('click');
+        assert.strictEqual(sandbox.window.open('https://ad.example.test/popup?id=4'), null);
+        assert.strictEqual(sandbox.window.location.href, before);
+    } finally {
+        global.setTimeout = realSetTimeout;
+    }
 });
 
 // 2b. Gesture window expiry: freeze Date.now just past 800 ms -> blocked again.

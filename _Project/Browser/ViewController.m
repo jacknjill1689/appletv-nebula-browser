@@ -302,6 +302,9 @@ static UIColor *kTextColor(void) {
 
 @interface ViewController () <BrowserMenuCoordinatorHost, BrowserPageActionCoordinatorHost, BrowserRemoteInputControllerHost, BrowserTabCoordinatorHost, BrowserTabOverviewControllerHost, BrowserTopBarViewDelegate, BrowserVideoPlaybackCoordinatorHost>
 
+// New-tab prompt bookkeeping: an ad page can fire several popup requests in
+// one click burst; only the first gets a prompt, the rest are dropped silently.
+@property (nonatomic) BOOL newTabPromptPending;
 @property (nonatomic) BrowserDOMInteractionService *domInteractionService;
 @property (nonatomic) BrowserMenuCoordinator *menuCoordinator;
 @property (nonatomic) BrowserNavigationService *navigationService;
@@ -1522,14 +1525,22 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
 
 // New-tab requests (window.open/target=_blank the popup blocker allowed) ask
 // the user first: the alert opens the tab itself, so the page's own play
-// button can no longer navigate away silently.
+// button can no longer navigate away silently. The prompt is presented after
+// a short delay and focuses "Stay on this page": the Select press that
+// triggered the click would otherwise be delivered to the freshly presented
+// alert and silently pick "Open in new tab" — that auto-confirm is exactly
+// how ad pop-ups used to steal the click and open an ad tab.
 - (BOOL)webView:(id)webView wantsConfirmationForNewTabRequest:(NSURLRequest *)request navigationType:(NSInteger)navigationType {
     (void)webView;
     (void)navigationType;
-    if (self.presentedViewController != nil) {
-        // A modal already owns the screen: no alert possible, fall back to
-        // the unconfirmed new-tab flow.
+    if (request.URL == nil) {
         return NO;
+    }
+    if (self.presentedViewController != nil || self.newTabPromptPending) {
+        // A modal owns the screen or a prompt is already up: drop the request
+        // instead of opening an unconfirmed tab (never surprise the user).
+        NSLog(@"[NewTab] dropped (modal up or prompt pending) url=%@", request.URL.absoluteString ?: @"");
+        return YES;
     }
 
     NSString *message = request.URL.absoluteString ?: @"";
@@ -1538,23 +1549,56 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
     }
     // Cross-site main-frame popups (target host not a textual descendant of
     // the opener page's host) keep the same prompt with an ad warning.
-    if (!BrowserHostIsTextualDescendantOfHost(request.URL.host, self.webview.request.URL.host)) {
+    BOOL sameSite = BrowserHostIsTextualDescendantOfHost(request.URL.host, self.webview.request.URL.host);
+    if (!sameSite) {
         message = [@"Possible ad pop-up: " stringByAppendingString:message];
     }
+
     UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Open in new tab?"
                                                                             message:message
                                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Stay on this page"
-                                                         style:UIAlertActionStyleCancel
-                                                       handler:nil]];
     __weak typeof(self) weakSelf = self;
-    [alertController addAction:[UIAlertAction actionWithTitle:@"Open in new tab"
-                                                        style:UIAlertActionStyleDefault
-                                                      handler:^(__unused UIAlertAction *action) {
-        // Same tab-opening flow the handledInTab path uses.
+    UIAlertAction *stayAction = [UIAlertAction actionWithTitle:@"Stay on this page"
+                                                         style:UIAlertActionStyleCancel
+                                                       handler:^(__unused UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        strongSelf.newTabPromptPending = NO;
+        // Same-site link: the user wanted that page, just not a second tab —
+        // follow it here so the click is not wasted.
+        if (sameSite) {
+            NSLog(@"[NewTab] stay -> loading same-tab url=%@", request.URL.absoluteString ?: @"");
+            [strongSelf.webview loadRequest:request];
+        }
+    }];
+    UIAlertAction *openAction = [UIAlertAction actionWithTitle:@"Open in new tab"
+                                                         style:UIAlertActionStyleDefault
+                                                       handler:^(__unused UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        strongSelf.newTabPromptPending = NO;
         [weakSelf.tabCoordinator createNewTabWithRequest:request];
-    }]];
-    [self presentViewController:alertController animated:YES completion:nil];
+    }];
+    [alertController addAction:stayAction];
+    [alertController addAction:openAction];
+    if (@available(tvOS 9.0, *)) {
+        alertController.preferredAction = stayAction;
+    }
+
+    self.newTabPromptPending = YES;
+    // 0.4s: let the originating Select press finish on the page instead of
+    // activating the alert's default button.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        if (strongSelf.presentedViewController != nil) {
+            strongSelf.newTabPromptPending = NO;
+            NSLog(@"[NewTab] dropped at present time (modal up) url=%@", request.URL.absoluteString ?: @"");
+            return;
+        }
+        NSLog(@"[NewTab] prompting url=%@ sameSite=%d", request.URL.absoluteString ?: @"", sameSite ? 1 : 0);
+        [strongSelf presentViewController:alertController animated:YES completion:nil];
+    });
     return YES;
 }
 
