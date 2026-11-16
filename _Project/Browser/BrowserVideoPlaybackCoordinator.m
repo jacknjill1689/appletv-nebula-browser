@@ -542,6 +542,181 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
     if (URL == nil) {
         return;
     }
+    // Resolve masters before presenting so the storage-edge hop never sees the
+    // embed Referer (see the note below); the tail re-enters only once because
+    // the resolved header set carries no Referer.
+    __weak typeof(self) weakSelf = self;
+    [self resolvePlaylistVariantForURL:URL requestHeaders:requestHeaders completion:^(NSURL *resolvedURL, NSDictionary<NSString *, NSString *> *resolvedHeaders) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        [strongSelf presentNativeVideoPlayerTailForURL:resolvedURL
+                                                 title:title
+                                        requestHeaders:resolvedHeaders
+                                               cookies:cookies
+                             candidateMasterPlaylistURLs:candidateMasterPlaylistURLs
+                                       subtitleFrameKey:subtitleFrameKey
+                                       presentationHost:presentationHost];
+    }];
+}
+
+// Streameast-family CDNs now protect the storage edge with a Referer
+// allowlist: the master playlist 403s unless the embed iframe's own URL is
+// the Referer, while the signed storage host 404s ANY request that carries
+// the embed origin as Referer or Origin (verified by curl A/B: no Referer
+// 200, embed Referer 404, playlist-host Referer 200). AVFoundation's plain
+// asset applies AVURLAssetHTTPHeaderFieldsKey to every request of the asset,
+// redirect hops included, so one header set cannot satisfy both hops.
+// Resolution: fetch the master ourselves with the browser headers, pick the
+// best variant, and present the variant playlist with UA-only headers (the
+// variant host and the redirect chain accept that). Falls back to the
+// original URL/headers when the master can't be read or is not a master.
+static NSString * const kBrowserVariantResolutionLogPrefix = @"[NativeVideoPlayer] variant resolve";
+
+- (nullable NSURL *)bestVariantURLInMasterPlaylistString:(NSString *)text baseURL:(NSURL *)baseURL {
+    if (![text containsString:@"#EXT-X-STREAM-INF"]) {
+        return nil;
+    }
+
+    NSArray<NSString *> *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSURL *bestURL = nil;
+    double bestBandwidth = -1.0;
+    for (NSUInteger index = 0; index < lines.count; index++) {
+        NSString *line = [lines[index] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (![line hasPrefix:@"#EXT-X-STREAM-INF"]) {
+            continue;
+        }
+
+        NSRange bandwidthRange = [line rangeOfString:@"BANDWIDTH="];
+        double bandwidth = 0.0;
+        if (bandwidthRange.location != NSNotFound) {
+            NSString *tail = [line substringFromIndex:NSMaxRange(bandwidthRange)];
+            NSMutableString *digits = [NSMutableString string];
+            for (NSUInteger i = 0; i < tail.length; i++) {
+                unichar c = [tail characterAtIndex:i];
+                if (c >= '0' && c <= '9') {
+                    [digits appendFormat:@"%C", c];
+                } else if (digits.length > 0) {
+                    break;
+                }
+            }
+            bandwidth = digits.doubleValue;
+        }
+
+        // The URI is the next non-comment line.
+        for (NSUInteger next = index + 1; next < lines.count; next++) {
+            NSString *uriLine = [lines[next] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (uriLine.length == 0 || [uriLine hasPrefix:@"#"]) {
+                continue;
+            }
+            NSURL *candidate = [NSURL URLWithString:uriLine relativeToURL:baseURL].absoluteURL;
+            if (candidate != nil && bandwidth > bestBandwidth) {
+                bestBandwidth = bandwidth;
+                bestURL = candidate;
+            }
+            break;
+        }
+    }
+    return bestURL;
+}
+
+// UA-only header set for the resolved variant playlist: drop Referer/Origin
+// (storage-edge hotlink protection) and keep the rest.
+- (NSDictionary<NSString *, NSString *> *)headersWithoutRefererOrOrigin:(NSDictionary<NSString *, NSString *> *)headers {
+    NSMutableDictionary<NSString *, NSString *> *clean = [NSMutableDictionary dictionary];
+    [headers enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, __unused BOOL *stop) {
+        if ([key caseInsensitiveCompare:@"Referer"] == NSOrderedSame ||
+            [key caseInsensitiveCompare:@"Origin"] == NSOrderedSame) {
+            return;
+        }
+        if (![value isKindOfClass:[NSString class]] || value.length == 0) {
+            return;
+        }
+        clean[key] = value;
+    }];
+    return clean;
+}
+
+- (void)resolvePlaylistVariantForURL:(NSURL *)URL
+                      requestHeaders:(NSDictionary<NSString *, NSString *> *)requestHeaders
+                          completion:(void (^)(NSURL *resolvedURL, NSDictionary<NSString *, NSString *> *resolvedHeaders))completion {
+    NSString *referer = nil;
+    for (NSString *key in requestHeaders) {
+        if ([key caseInsensitiveCompare:@"Referer"] == NSOrderedSame) {
+            referer = requestHeaders[key];
+            break;
+        }
+    }
+    // Nothing to fix: no Referer means no poisoning of the storage hop.
+    if (![self isHLSPlaylistURL:URL] || referer.length == 0) {
+        completion(URL, requestHeaders);
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
+    request.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
+    request.timeoutInterval = 10.0;
+    request.allHTTPHeaderFields = requestHeaders;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSString *text = nil;
+        NSInteger statusCode = 0;
+        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+            statusCode = ((NSHTTPURLResponse *)response).statusCode;
+        }
+        if (data.length > 0 && statusCode == 200) {
+            text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        }
+        NSURL *variantURL = [self bestVariantURLInMasterPlaylistString:text baseURL:URL];
+        if (variantURL == nil) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSLog(@"%@ fallback master=%@ status=%ld (kept Referer headers)", kBrowserVariantResolutionLogPrefix, URL.host, (long)statusCode);
+                completion(URL, requestHeaders);
+            });
+            return;
+        }
+
+        NSDictionary<NSString *, NSString *> *variantHeaders = [self headersWithoutRefererOrOrigin:requestHeaders];
+        // Only switch when the variant really serves without a Referer: other
+        // stream families may legitimately require one, and a wrong switch
+        // would break playback that used to work.
+        NSMutableURLRequest *variantRequest = [NSMutableURLRequest requestWithURL:variantURL];
+        variantRequest.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
+        variantRequest.timeoutInterval = 10.0;
+        variantRequest.allHTTPHeaderFields = variantHeaders;
+        NSURLSessionDataTask *variantTask = [[NSURLSession sharedSession] dataTaskWithRequest:variantRequest completionHandler:^(NSData *variantData, NSURLResponse *variantResponse, NSError *variantError) {
+            NSInteger variantStatus = 0;
+            if ([variantResponse isKindOfClass:[NSHTTPURLResponse class]]) {
+                variantStatus = ((NSHTTPURLResponse *)variantResponse).statusCode;
+            }
+            BOOL variantServes = (variantError == nil && variantStatus == 200 && variantData.length > 0);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (variantServes) {
+                    NSLog(@"%@ master=%@ -> variant=%@ headers=%lu", kBrowserVariantResolutionLogPrefix, URL.host, variantURL.host, (unsigned long)variantHeaders.count);
+                    completion(variantURL, variantHeaders);
+                } else {
+                    NSLog(@"%@ fallback variant=%@ status=%ld error=%@ (kept Referer headers)", kBrowserVariantResolutionLogPrefix, variantURL.host, (long)variantStatus, variantError.localizedDescription ?: @"none");
+                    completion(URL, requestHeaders);
+                }
+            });
+        }];
+        [variantTask resume];
+    }];
+    [task resume];
+}
+
+// Presentation tail: everything after playlist variant resolution.
+- (void)presentNativeVideoPlayerTailForURL:(NSURL *)URL
+                                     title:(NSString *)title
+                            requestHeaders:(NSDictionary<NSString *, NSString *> *)requestHeaders
+                                   cookies:(NSArray<NSHTTPCookie *> *)cookies
+                 candidateMasterPlaylistURLs:(NSArray<NSURL *> *)candidateMasterPlaylistURLs
+                           subtitleFrameKey:(NSString *)subtitleFrameKey
+                           presentationHost:(nullable NSString *)presentationHost {
+    if (URL == nil) {
+        return;
+    }
 
     // Arm the play-guard BEFORE pausing: the page's auto-resume watchdog
     // re-plays within a second of pauseAllMediaPlayback, and its play() then
