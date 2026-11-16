@@ -61,12 +61,24 @@ static NSString * const kBrowserSendReturnKeyScript = @"(function(){"
     return [self.domInteractionService evaluateHoverStateJavaScriptAtPoint:point webView:webView];
 }
 
+static BOOL BrowserPageActionHostIsTextualDescendantOfHost(NSString *host, NSString *potentialParent) {
+    if (host.length == 0 || potentialParent.length == 0) {
+        return NO;
+    }
+    NSString *lowercaseHost = host.lowercaseString;
+    NSString *lowercaseParent = potentialParent.lowercaseString;
+    return [lowercaseHost isEqualToString:lowercaseParent] ||
+           [lowercaseHost hasSuffix:[@"." stringByAppendingString:lowercaseParent]];
+}
+
 - (BOOL)handleTargetBlankLinkAtDOMPoint:(CGPoint)point webView:(BrowserWebView *)webView {
     NSDictionary *linkInfo = [self.domInteractionService linkInfoAtDOMPoint:point webView:webView];
     NSString *href = [linkInfo[@"href"] isKindOfClass:[NSString class]] ? linkInfo[@"href"] : @"";
     NSString *target = [linkInfo[@"target"] isKindOfClass:[NSString class]] ? linkInfo[@"target"] : @"";
+    BOOL hijack = [linkInfo[@"hijack"] boolValue];
+    NSString *topHref = [linkInfo[@"topHref"] isKindOfClass:[NSString class]] ? linkInfo[@"topHref"] : @"";
 
-    if (href.length == 0 || ![target isEqualToString:@"_blank"]) {
+    if (href.length == 0) {
         return NO;
     }
 
@@ -75,7 +87,42 @@ static NSString * const kBrowserSendReturnKeyScript = @"(function(){"
         return NO;
     }
 
-    return [self.host browserPageActionCoordinatorCreateNewTabWithRequest:request];
+    NSURL *pageURL = webView.request.URL;
+    BOOL sameSite = BrowserPageActionHostIsTextualDescendantOfHost(request.URL.host, pageURL.host);
+
+    // Hijack: a cross-site link sits on top of a same-site one (an ad layer
+    // covering a stream tile). The hit-test already resolved the link the
+    // user can actually see, so follow it here — the native tap would land on
+    // the overlay and never reach the tile.
+    if (hijack && sameSite) {
+        NSLog(@"[NewTab] hijack overlay=%@ over tile=%@ -> same-tab load", topHref, href);
+        [webView loadRequest:request];
+        return YES;
+    }
+
+    if (![target isEqualToString:@"_blank"]) {
+        return NO;
+    }
+
+    NSLog(@"[NewTab] target=_blank at cursor href=%@ sameSite=%d", href, sameSite ? 1 : 0);
+
+    // Never silently open a tab here: the site's ad layer marks its tiles
+    // _blank so every click farms a pop-up tab, which then eats the click
+    // (endless loop: tab, close, tab...). A same-site link is what the user
+    // asked for, so follow it in THIS tab; a cross-site link is an ad, so ask
+    // first and stay put unless the user opts in.
+    if (sameSite) {
+        NSLog(@"[NewTab] same-site link -> loading in current tab");
+        [webView loadRequest:request];
+        return YES;
+    }
+
+    SEL promptSelector = NSSelectorFromString(@"browserPageActionCoordinatorRequestNewTabConfirmationWithRequest:");
+    if ([self.host respondsToSelector:promptSelector]) {
+        [self.host performSelector:promptSelector withObject:request];
+        return YES;
+    }
+    return NO;
 }
 
 - (void)presentEditableFieldPromptForFieldType:(NSString *)fieldType

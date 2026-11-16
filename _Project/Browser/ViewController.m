@@ -1523,32 +1523,23 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
            [lowercaseHost hasSuffix:[@"." stringByAppendingString:lowercaseParent]];
 }
 
-// New-tab requests (window.open/target=_blank the popup blocker allowed) ask
-// the user first: the alert opens the tab itself, so the page's own play
-// button can no longer navigate away silently. The prompt is presented after
-// a short delay and focuses "Stay on this page": the Select press that
-// triggered the click would otherwise be delivered to the freshly presented
-// alert and silently pick "Open in new tab" — that auto-confirm is exactly
-// how ad pop-ups used to steal the click and open an ad tab.
-- (BOOL)webView:(id)webView wantsConfirmationForNewTabRequest:(NSURLRequest *)request navigationType:(NSInteger)navigationType {
-    (void)webView;
-    (void)navigationType;
+// Shared new-tab prompt. Presented after a short delay and focused on "Stay
+// on this page": the Select press that triggered the click would otherwise be
+// delivered to the freshly presented alert and silently pick "Open in new
+// tab" — that auto-confirm is how ad pop-ups stole the click.
+- (void)promptForNewTabRequest:(NSURLRequest *)request {
     if (request.URL == nil) {
-        return NO;
+        return;
     }
     if (self.presentedViewController != nil || self.newTabPromptPending) {
-        // A modal owns the screen or a prompt is already up: drop the request
-        // instead of opening an unconfirmed tab (never surprise the user).
         NSLog(@"[NewTab] dropped (modal up or prompt pending) url=%@", request.URL.absoluteString ?: @"");
-        return YES;
+        return;
     }
 
     NSString *message = request.URL.absoluteString ?: @"";
     if (message.length > 120) {
         message = [message substringToIndex:120];
     }
-    // Cross-site main-frame popups (target host not a textual descendant of
-    // the opener page's host) keep the same prompt with an ad warning.
     BOOL sameSite = BrowserHostIsTextualDescendantOfHost(request.URL.host, self.webview.request.URL.host);
     if (!sameSite) {
         message = [@"Possible ad pop-up: " stringByAppendingString:message];
@@ -1563,8 +1554,6 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
                                                        handler:^(__unused UIAlertAction *action) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         strongSelf.newTabPromptPending = NO;
-        // Same-site link: the user wanted that page, just not a second tab —
-        // follow it here so the click is not wasted.
         if (sameSite) {
             NSLog(@"[NewTab] stay -> loading same-tab url=%@", request.URL.absoluteString ?: @"");
             [strongSelf.webview loadRequest:request];
@@ -1584,8 +1573,6 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
     }
 
     self.newTabPromptPending = YES;
-    // 0.4s: let the originating Select press finish on the page instead of
-    // activating the alert's default button.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {
@@ -1599,7 +1586,23 @@ static BOOL BrowserHostIsTextualDescendantOfHost(NSString *host, NSString *poten
         NSLog(@"[NewTab] prompting url=%@ sameSite=%d", request.URL.absoluteString ?: @"", sameSite ? 1 : 0);
         [strongSelf presentViewController:alertController animated:YES completion:nil];
     });
+}
+
+- (BOOL)webView:(id)webView wantsConfirmationForNewTabRequest:(NSURLRequest *)request navigationType:(NSInteger)navigationType {
+    (void)webView;
+    (void)navigationType;
+    if (request.URL == nil) {
+        return NO;
+    }
+    [self promptForNewTabRequest:request];
     return YES;
+}
+
+// Host hook used by the page-selection path: the DOM probe found a
+// target=_blank link that is not same-site (an ad layer), so ask instead of
+// opening a tab.
+- (void)browserPageActionCoordinatorRequestNewTabConfirmationWithRequest:(NSURLRequest *)request {
+    [self promptForNewTabRequest:request];
 }
 
 - (BOOL)webView:(id)webView shouldStartLoadWithRequest:(NSURLRequest *)request navigationType:(NSInteger)navigationType {

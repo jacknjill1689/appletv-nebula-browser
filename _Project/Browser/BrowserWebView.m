@@ -961,6 +961,12 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                 "window.webkit.messageHandlers.browserMediaProbe.postMessage(payload);"
             "} catch (error) {}"
         "}"
+        "function postPopupInfo(payload) {"
+            "try {"
+                "if (!popupBlockerHasProbe()) { return; }"
+                "window.webkit.messageHandlers.browserMediaProbe.postMessage(payload);"
+            "} catch (error) {}"
+        "}"
         "function popupIsTopFrame() {"
             "try { return window.top === window.self; } catch (error) { return false; }"
         "}"
@@ -1070,6 +1076,7 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                             "popupFollowClickedAnchor(url);"
                             "return null;"
                         "}"
+                        "postPopupInfo({allowed: true, url: popupClip(url), top: popupIsTopFrame()});"
                     "} catch (error) {}"
                     "return popupOriginalOpen.apply(this, arguments);"
                 "};"
@@ -1195,6 +1202,82 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                     "}, true);"
                 "}"
             "}"
+        "} catch (error) {}"
+        "try {"
+            "if (window.__browserPopupBlockerConfig.block) {"
+                // Anchor integrity: ad layers rewrite a tile's href/target on
+                // hover so the click opens their page in a new tab. Remember
+                // each link's original same-site target and put it back when
+                // it starts pointing somewhere else.
+                "var popupAnchorOriginals = null;"
+                "try { popupAnchorOriginals = new WeakMap(); } catch (error) {}"
+                "function popupRememberAnchor(anchor) {"
+                    "try {"
+                        "if (!popupAnchorOriginals || !anchor || anchor.tagName === undefined) { return; }"
+                        "if (String(anchor.tagName).toUpperCase() !== 'A') { return; }"
+                        "if (popupAnchorOriginals.has(anchor)) { return; }"
+                        "popupAnchorOriginals.set(anchor, {"
+                            "href: String(anchor.getAttribute('href') || ''),"
+                            "target: String(anchor.getAttribute('target') || '')"
+                        "});"
+                    "} catch (error) {}"
+                "}"
+                "function popupRestoreAnchor(anchor) {"
+                    "try {"
+                        "if (!popupAnchorOriginals || !popupAnchorOriginals.has(anchor)) { return; }"
+                        "var original = popupAnchorOriginals.get(anchor);"
+                        "var current = String(anchor.getAttribute('href') || '');"
+                        "if (!current || current === original.href) { return; }"
+                        "var topOrigin = '', currentOrigin = '', originalOrigin = '';"
+                        "try {"
+                            "topOrigin = String(new URL(window.location.href).origin || '');"
+                            "currentOrigin = String(new URL(current, document.baseURI).origin || '');"
+                            "originalOrigin = String(new URL(original.href, document.baseURI).origin || '');"
+                        "} catch (error) { return; }"
+                        // Only revert a link that used to point at this site
+                        // and now points elsewhere — that is a hijack, not a
+                        // page updating its own navigation.
+                        "if (!originalOrigin || originalOrigin !== topOrigin || currentOrigin === topOrigin) { return; }"
+                        "anchor.setAttribute('href', original.href);"
+                        "if (original.target) { anchor.setAttribute('target', original.target); }"
+                        "else { anchor.removeAttribute('target'); }"
+                        "postPopupInfo({anchorRestored: true, href: popupClip(original.href)});"
+                    "} catch (error) {}"
+                "}"
+                "function popupScanAnchors() {"
+                    "try {"
+                        "var anchors = document.querySelectorAll('a[href]');"
+                        "for (var i = 0; i < anchors.length; i += 1) {"
+                            "popupRememberAnchor(anchors[i]);"
+                            "popupRestoreAnchor(anchors[i]);"
+                        "}"
+                    "} catch (error) {}"
+                "}"
+                "popupScanAnchors();"
+                "try {"
+                    "if (window.MutationObserver) {"
+                        "var popupAnchorObserver = new MutationObserver(function(changes) {"
+                            "for (var i = 0; i < changes.length; i += 1) {"
+                                "try {"
+                                    "var node = changes[i].target;"
+                                    "if (!node) { continue; }"
+                                    "popupRememberAnchor(node);"
+                                    "popupRestoreAnchor(node);"
+                                "} catch (error) {}"
+                            "}"
+                        "});"
+                        "popupAnchorObserver.observe(document.documentElement || document, {"
+                            "subtree: true, attributes: true, attributeFilter: ['href', 'target']"
+                        "});"
+                    "}"
+                "} catch (error) {}"
+                "setInterval(popupScanAnchors, 1500);"
+            "}"
+        "} catch (error) {}"
+        "try {"
+            // Install beacon: proves this frame got the blocker and shows
+            // whether it is the top document.
+            "postPopupInfo({installed: true, top: popupIsTopFrame(), href: popupClip(document.location.href)});"
         "} catch (error) {}"
     "})();";
     return [config stringByAppendingString:script];
@@ -2085,6 +2168,21 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     if (![body isKindOfClass:[NSDictionary class]]) {
         return;
     }
+    // Diagnostics: install beacon per frame, and allowed (not blocked) opens.
+    if ([body[@"installed"] boolValue]) {
+        NSLog(@"[PopupBlocker] installed top=%d href=%@", [body[@"top"] boolValue] ? 1 : 0,
+              [body[@"href"] isKindOfClass:[NSString class]] ? body[@"href"] : @"");
+        return;
+    }
+    if ([body[@"anchorRestored"] boolValue]) {
+        NSLog(@"[PopupBlocker] anchor restored href=%@", [body[@"href"] isKindOfClass:[NSString class]] ? body[@"href"] : @"");
+        return;
+    }
+    if ([body[@"allowed"] boolValue]) {
+        NSLog(@"[PopupBlocker] allowed top=%d url=%@", [body[@"top"] boolValue] ? 1 : 0,
+              [body[@"url"] isKindOfClass:[NSString class]] ? body[@"url"] : @"");
+        return;
+    }
     // Popup-blocker reports ({blocked:true, url}) carry no pageURL: append
     // them to the capped blockedPopups list instead of the per-frame store.
     if ([body[@"blocked"] boolValue]) {
@@ -2613,6 +2711,7 @@ windowFeatures:(id)windowFeatures {
 
     NSURLRequest *request = [self requestFromNavigationAction:navigationAction];
     NSInteger navigationType = [self navigationTypeFromNavigationAction:navigationAction];
+    NSLog(@"[NewTab] popup request url=%@ type=%ld", request.URL.absoluteString ?: @"(nil)", (long)navigationType);
 
     // Frame-initiated popups (streameast-style click-hijack: an iframe
     // overlays a transparent layer on the play button and turns clicks into
