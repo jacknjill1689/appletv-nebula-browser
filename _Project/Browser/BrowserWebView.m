@@ -982,18 +982,36 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                 "return !!topOrigin && topOrigin === candidate;"
             "} catch (error) { return false; }"
         "}"
+        "function popupAnchorIntent(url) {"
+            "try {"
+                // A popup is user-intended only when the click that opened it
+                // landed on an <a> and the popup target shares that link's
+                // origin. AdCash-style pop-unders (aclib.runPop) call
+                // window.open from any click, including on the video itself,
+                // and used to slip through the bare gesture window.
+                "var intent = window.__browserLastAnchorIntent;"
+                "if (!intent) { return false; }"
+                "if ((popupNow() - intent.ts) > 800) { return false; }"
+                "var raw = String(url == null ? '' : url);"
+                "if (!raw) { return false; }"
+                "var intentOrigin = '', popupOrigin = '';"
+                "try {"
+                    "intentOrigin = String(new URL(intent.href, document.baseURI).origin || '');"
+                    "popupOrigin = String(new URL(raw, document.baseURI).origin || '');"
+                "} catch (error) { return false; }"
+                "return !!intentOrigin && intentOrigin === popupOrigin;"
+            "} catch (error) { return false; }"
+        "}"
         "function popupShouldBlock(url) {"
             "try {"
-                // Never block: real user gesture in this frame, blob:, or
-                // same-origin to the top document.
-                "if (popupWithinGestureWindow()) { return false; }"
+                // Never block: blob:, same-origin to the top document, or an
+                // anchor-intended open inside the gesture window.
                 "var u = String(url == null ? '' : url).toLowerCase();"
                 "if (u.indexOf('blob:') === 0) { return false; }"
                 "if (popupSameOriginToTop(url)) { return false; }"
-                // Block heuristics: sub-frame opens, and blankish targets
-                // (about:blank / about:srcdoc / javascript: / empty) are the
-                // classic ad-popup shapes. A non-gesture http(s) popup from
-                // the top frame is blocked too (it failed the allow-list).
+                "if (popupWithinGestureWindow() && popupAnchorIntent(url)) { return false; }"
+                // Everything else (script-initiated pop-unders, sub-frame
+                // opens, blankish targets) is the classic ad-popup shape.
                 "return true;"
             "} catch (error) { return false; }"
         "}"
@@ -1002,8 +1020,25 @@ static NSString *BrowserPopupBlockerUserScriptWithFlags(BOOL popupEnabled, BOOL 
                 // Per-frame user-gesture timestamps: capture-phase listeners
                 // so page stopPropagation() cannot hide a real click.
                 "var popupMarkGesture = function() { try { window.__lastUserGestureTs = popupNow(); } catch (error) {} };"
+                // Record what the click actually landed on: only an <a> click
+                // counts as intent to open a popup (see popupAnchorIntent).
+                "var popupRecordAnchor = function(event) {"
+                    "try {"
+                        "var node = event && event.target;"
+                        "while (node && node !== document) {"
+                            "if (String(node.tagName || '').toUpperCase() === 'A') {"
+                                "var href = String(node.href || node.getAttribute('href') || '');"
+                                "window.__browserLastAnchorIntent = {href: href, ts: popupNow()};"
+                                "return;"
+                            "}"
+                            "node = node.parentNode;"
+                        "}"
+                        "window.__browserLastAnchorIntent = null;"
+                    "} catch (error) {}"
+                "};"
                 "window.addEventListener('pointerdown', popupMarkGesture, true);"
                 "window.addEventListener('click', popupMarkGesture, true);"
+                "window.addEventListener('click', popupRecordAnchor, true);"
             "}"
         "} catch (error) {}"
         "try {"

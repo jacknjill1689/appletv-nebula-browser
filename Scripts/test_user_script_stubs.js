@@ -16,7 +16,11 @@ const webviewPath = path.join(__dirname, '..', '_Project', 'Browser', 'BrowserWe
 const scriptSource = extractAssembledScript(webviewPath, 'BrowserPopupBlockerUserScriptWithFlags');
 
 class FakeEvent {
-    constructor(type) { this.type = type; }
+    constructor(type, target) { this.type = type; this.target = target || null; }
+}
+
+function fakeAnchor(href) {
+    return { tagName: 'A', href, getAttribute: () => href, parentNode: null };
 }
 
 function makeSandbox({ crossFrame }) {
@@ -70,7 +74,7 @@ function makeSandbox({ crossFrame }) {
         factory(window, document, () => 0, FakeEvent, Document);
     };
 
-    const fireWindow = (name) => { (windowListeners[name] || []).forEach((fn) => fn(new FakeEvent(name))); };
+    const fireWindow = (name, target) => { (windowListeners[name] || []).forEach((fn) => fn(new FakeEvent(name, target))); };
     const fireDocument = (name) => { (documentListeners[name] || []).forEach((fn) => fn(new FakeEvent(name))); };
 
     return { window, document, openedURLs, probeReports, run, fireWindow, fireDocument };
@@ -100,15 +104,42 @@ check('window.open blocked for cross-origin non-gesture call', () => {
     assert.strictEqual(report.url, 'https://ad.example.test/popup?id=1');
 });
 
-// 2. Same call within the 800 ms gesture window -> allowed through.
-check('window.open allowed within 800 ms of a simulated gesture', () => {
+// 2. A gesture alone no longer allows a popup: AdCash-style pop-unders call
+//    window.open on ANY click (including on the video), so only an anchor
+//    click with a matching target origin counts as intent.
+check('window.open blocked within the gesture window when the click hit no anchor', () => {
+    const sandbox = makeSandbox({ crossFrame: false });
+    sandbox.run();
+    sandbox.fireWindow('pointerdown'); // capture-phase gesture tracker, no anchor
+    sandbox.fireWindow('click');
+    const result = sandbox.window.open('https://ad.example.test/popup?id=2');
+    assert.strictEqual(result, null, 'gesture-only window.open must be blocked');
+    assert.deepStrictEqual(sandbox.openedURLs, []);
+    const report = sandbox.probeReports.find((payload) => payload.blocked === true);
+    assert.ok(report, 'the blocked pop-under must be reported');
+});
+
+// 2c. Anchor-intended open (click landed on <a> pointing at the same origin
+//     as the popup) is allowed through.
+check('window.open allowed after an anchor click to the same origin', () => {
     const sandbox = makeSandbox({ crossFrame: true });
     sandbox.run();
-    sandbox.fireWindow('pointerdown'); // capture-phase gesture tracker
-    const result = sandbox.window.open('https://ad.example.test/popup?id=2');
-    assert.deepStrictEqual(result, { __nativeWindow: true }, 'open must pass through after the gesture');
-    assert.deepStrictEqual(sandbox.openedURLs, ['https://ad.example.test/popup?id=2']);
+    sandbox.fireWindow('click', fakeAnchor('https://ad.example.test/article'));
+    const result = sandbox.window.open('https://ad.example.test/article');
+    assert.deepStrictEqual(result, { __nativeWindow: true }, 'anchor-intended open must pass through');
+    assert.deepStrictEqual(sandbox.openedURLs, ['https://ad.example.test/article']);
     assert.strictEqual(sandbox.probeReports.find((payload) => payload.blocked === true), undefined);
+});
+
+// 2d. Anchor click to one origin, popup to another -> blocked (mismatch is
+//     the hijack shape).
+check('window.open blocked when the popup origin differs from the clicked anchor', () => {
+    const sandbox = makeSandbox({ crossFrame: false });
+    sandbox.run();
+    sandbox.fireWindow('click', fakeAnchor('https://site.example.test/story'));
+    const result = sandbox.window.open('https://ad.example.test/popup?id=3');
+    assert.strictEqual(result, null);
+    assert.deepStrictEqual(sandbox.openedURLs, []);
 });
 
 // 2b. Gesture window expiry: freeze Date.now just past 800 ms -> blocked again.
@@ -119,7 +150,7 @@ check('window.open blocked again 801 ms after the gesture', () => {
         const start = Date.now();
         Date.now = () => start;
         sandbox.run();
-        sandbox.fireWindow('pointerdown');
+        sandbox.fireWindow('click', fakeAnchor('https://ad.example.test/popup'));
         assert.deepStrictEqual(sandbox.window.open('https://ad.example.test/popup?a=1'), { __nativeWindow: true });
         Date.now = () => start + 801;
         assert.strictEqual(sandbox.window.open('https://ad.example.test/popup?a=2'), null);
