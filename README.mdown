@@ -54,7 +54,7 @@ Feature ideas belong at [alan-maldonado/appletv-nebula-browser](https://github.c
 How to Install Nebula Browser
 =============
 
-Upstream ships no binary; building from Xcode (as described below) is the general path. This fork additionally publishes **developer-signed builds** under Releases — they install only on devices registered in the signer's provisioning profile (e.g. `xcrun devicectl device install app --device <AppleTV-UDID> <file>.ipa`). Not notarized, not for the App Store.
+Upstream ships no binary; building from Xcode (as described below) is the general path. This fork does not publish prebuilt binaries.
 
 To install this app, connect your Apple TV to your macOS computer via WiFi (or USB on older devices). Open this project in Xcode and install to your Apple TV.
 Connecting to your Apple TV wirelessly: http://www.redmondpie.com/how-to-wirelessly-connect-apple-tv-4k-to-xcode-on-mac/.
