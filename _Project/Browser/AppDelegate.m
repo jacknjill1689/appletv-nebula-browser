@@ -99,6 +99,31 @@
         @"NativePresentSecondPresentSeconds": @0,
     }];
 
+    // One-time repair (schema 1): earlier builds persisted diagnostic launch
+    // flags via setBool:, so a debugging session could leave the app permanently
+    // reconfigured. Strip those keys and drop Native Video Mode's override so
+    // the registered defaults apply again (mode ON, media-engine hooks on).
+    NSInteger flagSchema = [[NSUserDefaults standardUserDefaults] integerForKey:@"DiagnosticFlagSchema"];
+    if (flagSchema < 1) {
+        NSArray<NSString *> *poisonedKeys = @[
+            @"MediaEngineHooksDisabled", @"MediaEngineHlsFlagDisabled",
+            @"MediaEngineNetFlagDisabled", @"MediaEngineSrcFlagDisabled",
+            @"MediaEngineProbeFlagDisabled", @"MemDiagDisabled",
+            @"PopupBlockerDisabled", @"VisibilitySpoofDisabled",
+            @"NativeAutoFullscreenPromptDisabled", @"NativeAutoFullscreenDisabled",
+            @"ForcePlayOnLaunch", @"NativePlayerLoaderDisabled",
+            @"ForceNativePresentOnPlay", @"NativeClickEnabled",
+            @"NativeVideoModeDisabled",
+            @"JsDiagEnabled", @"ClearanceSeedEnabled", @"FocusSpoofEnabled"
+        ];
+        for (NSString *key in poisonedKeys) {
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:key];
+        }
+        [[NSUserDefaults standardUserDefaults] setInteger:1 forKey:@"DiagnosticFlagSchema"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        NSLog(@"[Defaults] repaired persisted diagnostic flags (schema 1)");
+    }
+
     NSArray<NSString *> *diagnosticKeys = @[
         @"MediaEngineHooksDisabled",
         @"MediaEngineHlsFlagDisabled",
@@ -126,16 +151,18 @@
                 continue;
             }
             NSString *value = (i + 1 < arguments.count) ? arguments[i + 1] : nil;
-            if ([value isEqualToString:@"YES"]) {
-                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:key];
-            }
-            else if ([value isEqualToString:@"NO"]) {
-                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:key];
-            }
+            // Deliberately NOT persisted. NSUserDefaults already exposes
+            // "-Key value" launch arguments through its (volatile) argument
+            // domain, which is all a debug run needs. Writing them with
+            // setBool: made a single diagnostic launch permanent: passing
+            // MediaEngineHooksDisabled / NativeVideoModeDisabled during the
+            // watched.cx investigation left the app with the media-engine hooks
+            // stripped and MSE enabled, so no other site could play until the
+            // values were repaired by hand.
+            (void)value;
             break;
         }
     }
-    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
@@ -164,7 +191,7 @@
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 	// Override point for customization after application launch.
-    NSLog(@"[Build] %s %s popup-hijack-v23", __DATE__, __TIME__);
+    NSLog(@"[Build] %s %s popup-hijack-v24", __DATE__, __TIME__);
     [self applyDiagnosticLaunchArguments];
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"MobileMode"]) {
         [[NSUserDefaults standardUserDefaults] setObject:BrowserPreferencesStore.mobileUserAgent forKey:@"UserAgent"];
