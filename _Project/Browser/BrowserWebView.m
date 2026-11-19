@@ -1405,175 +1405,6 @@ static NSString *BrowserFakeFullscreenScript(void) {
     "})();";
 }
 
-// Opt-in (JsDiagEnabled) page-side diagnostics: surface uncaught JS errors,
-// unhandled rejections, failed resource loads and non-OK API responses so a
-// silent site failure (e.g. a stalled bot-clearance widget) is visible in the
-// device console instead of only as a hung player.
-static NSString *BrowserJsDiagnosticsScript(void) {
-    return @"(function(){"
-        "try {"
-            "if (window.__browserJsDiagInstalled) { return; }"
-            "window.__browserJsDiagInstalled = true;"
-            "function send(kind, detail) {"
-                "try {"
-                    "if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.browserMediaProbe) {"
-                        "window.webkit.messageHandlers.browserMediaProbe.postMessage({jsDiag:{kind:kind, href:String(document.location.href).slice(0,300), detail:String(detail || '').slice(0,600)}});"
-                    "}"
-                "} catch (e) {}"
-            "}"
-            "window.addEventListener('error', function(ev) {"
-                "try {"
-                    "var t = ev.target;"
-                    "if (t && t.tagName && (t.tagName === 'SCRIPT' || t.tagName === 'IFRAME' || t.tagName === 'IMG' || t.tagName === 'LINK')) {"
-                        "send('resource-error', t.tagName + ' ' + (t.src || t.href || ''));"
-                    "} else {"
-                        "send('error', (ev.message || '') + ' @ ' + (ev.filename || '') + ':' + (ev.lineno || 0) + ':' + (ev.colno || 0));"
-                    "}"
-                "} catch (e) {}"
-            "}, true);"
-            "window.addEventListener('unhandledrejection', function(ev) {"
-                "try { var r = ev.reason; send('unhandledrejection', (r && (r.message || r.stack)) || String(r)); } catch (e) {}"
-            "}, true);"
-            "try {"
-                "var origError = console.error;"
-                "console.error = function() {"
-                    "try {"
-                        "var parts = [];"
-                        "for (var i = 0; i < arguments.length; i += 1) {"
-                            "var a = arguments[i];"
-                            "try { parts.push(typeof a === 'string' ? a : JSON.stringify(a)); } catch (e) { parts.push(String(a)); }"
-                        "}"
-                        "send('console.error', parts.join(' '));"
-                    "} catch (e) {}"
-                    "return origError.apply(console, arguments);"
-                "};"
-            "} catch (e) {}"
-            "try {"
-                "var origFetch = window.fetch;"
-                "if (origFetch) {"
-                    "window.fetch = function(input, init) {"
-                        "var url = (typeof input === 'string') ? input : ((input && input.url) || '');"
-                        "return origFetch.call(this, input, init).then(function(resp) {"
-                            "try {"
-                                "var clearance = resp.headers.get('x-clearance') || '';"
-                                "var guard = resp.headers.get('x-guard') || '';"
-                                "window.__browserDiagFetchCount = (window.__browserDiagFetchCount || 0) + 1;"
-                                "if (window.__browserDiagFetchCount <= 25 || !resp.ok || clearance || guard) {"
-                                    "var wvc = (/wvc_until=(\\d+)/.exec(document.cookie) || [])[1] || 'none';"
-                                    "send('fetch', resp.status + ' ' + url.slice(0, 160) + ' clearance=' + clearance + ' guard=' + guard + ' wvc=' + wvc);"
-                                "}"
-                                "if (url.indexOf('/api/tv/') >= 0) {"
-                                    "try {"
-                                        "resp.clone().text().then(function(text) {"
-                                            "send('api-body', url.slice(0, 120) + ' len=' + text.length + ' body=' + text.slice(0, 400));"
-                                        "}).catch(function(err) { send('api-body-error', url.slice(0, 120) + ' ' + err); });"
-                                    "} catch (e) { send('api-body-throw', url.slice(0, 120)); }"
-                                "}"
-                            "} catch (e) {}"
-                            "return resp;"
-                        "});"
-                    "};"
-                "}"
-            "} catch (e) {}"
-            // XHR path: the player may use XMLHttpRequest instead of fetch.
-            "try {"
-                "var xhrCount = 0;"
-                "var origOpen = XMLHttpRequest.prototype.open;"
-                "var origSend = XMLHttpRequest.prototype.send;"
-                "XMLHttpRequest.prototype.open = function(method, url) {"
-                    "try { this.__browserDiagURL = String(url || ''); this.__browserDiagMethod = String(method || ''); } catch (e) {}"
-                    "return origOpen.apply(this, arguments);"
-                "};"
-                "XMLHttpRequest.prototype.send = function() {"
-                    "var xhr = this;"
-                    "try {"
-                        "xhr.addEventListener('loadend', function() {"
-                            "try {"
-                                "xhrCount += 1;"
-                                "var clearance = ''; var guard = '';"
-                                "try { clearance = xhr.getResponseHeader('x-clearance') || ''; } catch (e) {}"
-                                "try { guard = xhr.getResponseHeader('x-guard') || ''; } catch (e) {}"
-                                "if (xhrCount <= 25) {"
-                                    "send('xhr', xhr.status + ' ' + xhr.__browserDiagMethod + ' ' + (xhr.__browserDiagURL || '').slice(0, 160) + ' clearance=' + clearance + ' guard=' + guard);"
-                                "}"
-                            "} catch (e) {}"
-                        "});"
-                    "} catch (e) {}"
-                    "return origSend.apply(this, arguments);"
-                "};"
-            "} catch (e) {}"
-            // is it, and did wvc_until ever appear? Bounded to keep logs small.
-            "try {"
-                "var diagTicks = 0;"
-                "var diagTimer = setInterval(function() {"
-                    "diagTicks += 1;"
-                    "if (diagTicks > 10) { clearInterval(diagTimer); return; }"
-                    "try {"
-                        "var frames = document.querySelectorAll('iframe');"
-                        "var parts = [];"
-                        "for (var i = 0; i < frames.length && parts.length < 3; i += 1) {"
-                            "var f = frames[i];"
-                            "var rect = f.getBoundingClientRect();"
-                            "parts.push((f.src || '').slice(0, 90) + ' ' + Math.round(rect.width) + 'x' + Math.round(rect.height));"
-                        "}"
-                        "var wvc = (/wvc_until=(\\d+)/.exec(document.cookie) || [])[1] || 'none';"
-                        "var cookieNames = document.cookie.split('; ').map(function(c) { return c.split('=')[0]; }).join(',');"
-                        "var videos = [];"
-                        "var vlist = document.querySelectorAll('video');"
-                        "for (var j = 0; j < vlist.length; j += 1) { videos.push((vlist[j].currentSrc || '').slice(0, 30) + '/' + vlist[j].readyState); }"
-                        "send('state', 'turnstile=' + (typeof window.turnstile) + ' wvc=' + wvc + ' cookies=' + cookieNames + ' frames=' + parts.join(' | ') + ' videos=' + videos.join(','));"
-                    "} catch (e) {}"
-                "}, 5000);"
-            "} catch (e) {}"
-        "} catch (e) {}"
-    "})();";
-}
-
-// Opt-in (FocusSpoofEnabled): report the page as focused/activated. Some bot
-// checks (Cloudflare Turnstile's invisible mode in particular) refuse to issue
-// a token while document.hasFocus() is false, which is the normal state inside
-// a tvOS WKWebView that never holds first-responder focus.
-static NSString *BrowserFocusSpoofScript(void) {
-    return @"(function(){"
-        "try {"
-            "var focused = function() { return true; };"
-            "try { Document.prototype.hasFocus = focused; } catch (e) {}"
-            "try { document.hasFocus = focused; } catch (e) {}"
-            "try {"
-                "var activation = navigator.userActivation;"
-                "if (activation) {"
-                    "Object.defineProperty(activation, 'isActive', { get: function() { return true; }, configurable: true });"
-                    "Object.defineProperty(activation, 'hasBeenActive', { get: function() { return true; }, configurable: true });"
-                "}"
-            "} catch (e) {}"
-        "} catch (e) {}"
-    "})();";
-}
-
-// Opt-in (ClearanceSeedEnabled): pre-set the site's client-side clearance
-// flag. watched.cx stores `wvc_until` (a JS-written timestamp) and skips its
-// Turnstile round-trip when the value is more than 10 minutes ahead, so a
-// WebView whose challenge never completes can still reach the stream API.
-// Diagnostic only: proves whether the server enforces clearance separately.
-static NSString *BrowserClearanceSeedScript(void) {
-    return @"(function(){"
-        "try {"
-            "var match = /wvc_until=(\\d+)/.exec(document.cookie);"
-            "var now = Math.floor(Date.now() / 1000);"
-            "var current = match ? Number(match[1]) : 0;"
-            "if (current - 600 <= now) {"
-                "var until = now + 3600;"
-                "document.cookie = 'wvc_until=' + until + '; path=/; max-age=7200';"
-                "try {"
-                    "if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.browserMediaProbe) {"
-                        "window.webkit.messageHandlers.browserMediaProbe.postMessage({jsDiag:{kind:'clearance-seeded', href:String(document.location.href), detail:'until=' + until}});"
-                    "}"
-                "} catch (e) {}"
-            "}"
-        "} catch (e) {}"
-    "})();";
-}
-
 // watched.cx (Live TV): the site's player is MSE-only and never starts inside
 // the tvOS WebView — it renders a splash, creates empty <video> elements and
 // makes no stream request at all, so the native takeover has nothing to play
@@ -1643,9 +1474,9 @@ static NSString *BrowserWatchedLiveResolverScript(void) {
             "}"
             // One payload entry per channel; the logo filename carries the slug
             // (watched-a-and-e-939e92a9.png), so slug and streamId pair up.
-            "function buildMap() {"
+            "function buildMap(text) {"
                 "var map = {};"
-                "var text = pageText();"
+                "if (!text) { text = pageText(); }"
                 "var start = text.indexOf(ID_MARKER);"
                 "while (start >= 0) {"
                     "var next = text.indexOf(ID_MARKER, start + ID_MARKER.length);"
@@ -1682,13 +1513,6 @@ static NSString *BrowserWatchedLiveResolverScript(void) {
                 "}"
                 "return hit;"
             "}"
-            "function log(detail) {"
-                "try {"
-                    "if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.browserMediaProbe) {"
-                        "window.webkit.messageHandlers.browserMediaProbe.postMessage({jsDiag:{kind:'watched-resolved', href:String(location.href), detail:String(detail).slice(0, 200)}});"
-                    "}"
-                "} catch (e) {}"
-            "}"
             // Present the resolved channel up front instead of parking the URL in
             // window.__browserCapturedMediaURLs: a captured list makes every
             // Select press open the native player (via the video-at-point
@@ -1703,7 +1527,6 @@ static NSString *BrowserWatchedLiveResolverScript(void) {
                 "try {"
                     "if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.browserFullscreen) {"
                         "window.webkit.messageHandlers.browserFullscreen.postMessage({src:'', time:0, title:document.title || '', capturedMedia:[url]});"
-                        "log('present slug=' + slug);"
                     "}"
                 "} catch (e) {}"
             "}"
@@ -1721,29 +1544,57 @@ static NSString *BrowserWatchedLiveResolverScript(void) {
                     "return resp.ok ? resp.json() : null;"
                 "}).then(function(json) {"
                     "var url = json && json.url ? String(json.url) : '';"
-                    "if (!url) { log('no-url slug=' + slug + ' id=' + id); return; }"
+                    "if (!url) { return; }"
                     "cache[slug] = { url: url, expiresAt: json.expiresAt || new Date(Date.now() + 1800000).toISOString() };"
-                    "if (currentSlug() === slug && pendingPresentation) { present(slug, url); pendingPresentation = false; }"
-                    "log('id=' + id + ' slug=' + slug + ' url=' + url.slice(0, 90));"
+                    "if (currentSlug() === slug) { finishPresentation(slug); }"
                 "}).catch(function() {});"
+            "}"
+            "var htmlIdCache = {};"
+            "var htmlFetchSlug = '';"
+            "function finishPresentation(slug) {"
+                "if (!pendingPresentation) { return; }"
+                "pendingPresentation = false;"
+                "var entry = cache[slug];"
+                "if (isFresh(entry)) { lastPresentedSlug = ''; present(slug, entry.url); }"
+            "}"
+            "function fetchIdFromHtml(slug) {"
+                "if (!slug || htmlFetchSlug === slug) { return; }"
+                "htmlFetchSlug = slug;"
+                "fetch('https://watched.cx/live?ch=' + encodeURIComponent(slug), {"
+                    "credentials: 'same-origin',"
+                    "cache: 'no-store'"
+                "}).then(function(resp) {"
+                    "return resp.ok ? resp.text() : '';"
+                "}).then(function(text) {"
+                    "if (htmlFetchSlug === slug) { htmlFetchSlug = ''; }"
+                    "if (!text) { return; }"
+                    "var map = buildMap(text);"
+                    "var id = map[slug] || prefixMatch(map, slug);"
+                    "if (!id) {"
+                        "idMap = map;"
+                        "return;"
+                    "}"
+                    "htmlIdCache[slug] = id;"
+                    "var keys = Object.keys(map);"
+                    "for (var i = 0; i < keys.length; i += 1) {"
+                        "if (!idMap[keys[i]]) { idMap[keys[i]] = map[keys[i]]; }"
+                    "}"
+                    "if (currentSlug() === slug) { resolve(slug, id); }"
+                "}).catch(function() {"
+                    "if (htmlFetchSlug === slug) { htmlFetchSlug = ''; }"
+                "});"
             "}"
             "function tick() {"
                 "var slug = currentSlug();"
                 "if (!slug) { return; }"
                 "var entry = cache[slug];"
-                "if (isFresh(entry)) { return; }"
+                "if (isFresh(entry)) { finishPresentation(slug); return; }"
                 "if (!idMap) { idMap = buildMap(); }"
                 "var id = idMap[slug] || '';"
-                "if (!id) {"
-                    "idMap = buildMap();"
-                    "id = idMap[slug] || '';"
-                    "if (!id) { id = prefixMatch(idMap, slug); }"
-                    "if (!id) {"
-                        "var keys = Object.keys(idMap);"
-                        "log('no-id slug=' + slug + ' mapSize=' + keys.length + ' href=' + location.href + ' sample=' + keys.slice(0, 6).join(','));"
-                        "return;"
-                    "}"
-                "}"
+                "if (!id) { idMap = buildMap(); id = idMap[slug] || ''; }"
+                "if (!id) { id = prefixMatch(idMap, slug); }"
+                "if (!id) { id = htmlIdCache[slug] || ''; }"
+                "if (!id) { fetchIdFromHtml(slug); return; }"
                 "resolve(slug, id);"
             "}"
             // A press in the player area asks to start the channel; presses on the
@@ -1960,15 +1811,6 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
     // (PopupBlockerDisabled / VisibilitySpoofDisabled) evaluated per webview.
     BrowserInstallUserScriptSource(configuration, BrowserPopupBlockerUserScript());
     BrowserInstallUserScriptSource(configuration, BrowserFakeFullscreenScript());
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"JsDiagEnabled"]) {
-        BrowserInstallUserScriptSource(configuration, BrowserJsDiagnosticsScript());
-    }
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"FocusSpoofEnabled"]) {
-        BrowserInstallUserScriptSource(configuration, BrowserFocusSpoofScript());
-    }
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"ClearanceSeedEnabled"]) {
-        BrowserInstallUserScriptSource(configuration, BrowserClearanceSeedScript());
-    }
     BrowserInstallUserScriptSource(configuration, BrowserWatchedLiveResolverScript());
     [self installFullscreenScriptMessageHandlerOnConfiguration:configuration];
     [self installMediaProbeScriptMessageHandlerOnConfiguration:configuration];
@@ -2550,12 +2392,6 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
         return;
     }
     // Diagnostics: install beacon per frame, and allowed (not blocked) opens.
-    if ([body[@"jsDiag"] isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *diag = body[@"jsDiag"];
-        NSLog(@"[JSDiag] kind=%@ href=%@ detail=%@",
-              diag[@"kind"] ?: @"", diag[@"href"] ?: @"", diag[@"detail"] ?: @"");
-        return;
-    }
     if ([body[@"installed"] boolValue]) {
         NSLog(@"[PopupBlocker] installed top=%d href=%@", [body[@"top"] boolValue] ? 1 : 0,
               [body[@"href"] isKindOfClass:[NSString class]] ? body[@"href"] : @"");
@@ -2616,15 +2452,9 @@ static void BrowserInstallYouTubeCaptureUserScript(id configuration) {
         _frameInfoStoredTimeByFrameKey[frameKey] = [NSDate date];
     }
     static NSInteger probeStoreLogCount = 0;
-    if (probeStoreLogCount < 12) {
+    if (probeStoreLogCount < 5) {
         probeStoreLogCount++;
         NSLog(@"[NativeVideoPlayer] probe store frameKey=%@ frameInfo=%@ self=%p", frameKey, frameInfo ? NSStringFromClass([frameInfo class]) : @"NIL", self);
-        NSArray *dbgVideos = [body[@"videos"] isKindOfClass:[NSArray class]] ? body[@"videos"] : @[];
-        NSArray *dbgCaptured = [body[@"captured"] isKindOfClass:[NSArray class]] ? body[@"captured"] : @[];
-        NSLog(@"[ProbeDump] frameKey=%@ videos=%lu captured=%lu firstVideo=%@ firstCaptured=%@",
-              frameKey, (unsigned long)dbgVideos.count, (unsigned long)dbgCaptured.count,
-              dbgVideos.count > 0 ? dbgVideos.firstObject : @"none",
-              dbgCaptured.count > 0 ? dbgCaptured.firstObject : @"none");
     }
 
     [self detectPlayingEmbedVideoInReport:body pageURL:pageURL frameKey:frameKey];
