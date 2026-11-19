@@ -333,6 +333,20 @@ static BOOL const kBrowserYouTubeNativeExtractionEnabled = NO;
         return NO;
     }
 
+    // watched.cx (Live TV): the site's MSE-only player never publishes a
+    // playable URL, so this press path can only ever answer with the
+    // "Native Video Unavailable" alert — and it swallows presses meant for the
+    // channel rail, which makes the page unbrowsable. Let every press fall
+    // through to a normal click; the site's user script presents the resolved
+    // channel when the press lands in the player area.
+    NSString *pageHost = self.host.browserWebView.request.URL.host.lowercaseString ?: @"";
+    if ([pageHost isEqualToString:@"watched.cx"] ||
+        [pageHost hasSuffix:@".watched.cx"] ||
+        [pageHost isEqualToString:@"watched.cv"] ||
+        [pageHost hasSuffix:@".watched.cv"]) {
+        return NO;
+    }
+
     CGPoint point = self.host.browserDOMCursorPoint;
     if ([self.domInteractionService isVideoDismissTargetAtDOMPoint:point webView:self.host.browserWebView]) {
         return NO;
